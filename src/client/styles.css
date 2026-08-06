@@ -1,0 +1,15 @@
+:root { color: #e8e5d9; background: #111411; font-family: "IBM Plex Mono", "Cascadia Mono", monospace; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; }
+.console { min-height: 100vh; padding: clamp(2rem, 8vw, 8rem); display: grid; align-content: center; gap: 3rem; background: radial-gradient(circle at 82% 12%, rgba(188, 255, 77, .13), transparent 24rem), #111411; }
+.masthead { border-bottom: 1px solid #3f493b; padding-bottom: 1.5rem; }
+.eyebrow, .label { color: #baff4d; font-size: .72rem; letter-spacing: .14em; margin: 0 0 .75rem; }
+h1 { font-family: "Bodoni Moda", Didot, serif; font-size: clamp(4rem, 13vw, 10rem); font-weight: 400; letter-spacing: -.08em; line-height: .75; margin: 0; }
+h1 span { color: #baff4d; }
+.signal { display: flex; align-items: center; gap: .55rem; margin-top: 1.5rem; font-size: .78rem; letter-spacing: .1em; text-transform: uppercase; }
+.signal i { width: .6rem; height: .6rem; border-radius: 50%; background: #d5a843; box-shadow: 0 0 0 .25rem rgba(213,168,67,.12); }
+.signal--connected i { background: #baff4d; box-shadow: 0 0 1.4rem #baff4d; }
+.signal--disconnected i { background: #ff715b; }
+.workspace-card { max-width: 56rem; border-left: .22rem solid #baff4d; padding: 1rem 1.4rem; background: rgba(232,229,217,.04); }
+.workspace { overflow-wrap: anywhere; font-size: clamp(1rem, 2.5vw, 1.6rem); line-height: 1.45; margin: 0; }
+.caption { color: #9fa99a; font-size: .82rem; margin: 1.25rem 0 0; }
