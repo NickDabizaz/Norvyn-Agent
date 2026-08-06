@@ -23,8 +23,7 @@ export class Transport extends EventEmitter {
   }
 
   static async connect(): Promise<Transport> {
-    const command = process.env.NORVYN_PROVIDER_COMMAND ?? "codex";
-    const args = process.env.NORVYN_PROVIDER_ARGUMENTS ? JSON.parse(process.env.NORVYN_PROVIDER_ARGUMENTS) as string[] : ["app-server"];
+    const { command, args } = providerLaunch();
     const transport = new Transport(command, args);
     const params: InitializeParams = { clientInfo: { name: "norvyn", title: "Norvyn", version: "0.1.0" }, capabilities: null };
     await transport.request("initialize", params);
@@ -64,4 +63,15 @@ export class Transport extends EventEmitter {
     }
     if (message.method) this.emit("notification", message as ServerNotificationEnvelope);
   }
+}
+
+export function providerLaunch(environment: NodeJS.ProcessEnv = process.env, platform = process.platform): { command: string; args: string[] } {
+  if (environment.NORVYN_PROVIDER_COMMAND) {
+    return {
+      command: environment.NORVYN_PROVIDER_COMMAND,
+      args: environment.NORVYN_PROVIDER_ARGUMENTS ? JSON.parse(environment.NORVYN_PROVIDER_ARGUMENTS) as string[] : ["app-server"],
+    };
+  }
+  if (platform === "win32") return { command: environment.ComSpec ?? "cmd.exe", args: ["/d", "/s", "/c", "codex app-server"] };
+  return { command: "codex", args: ["app-server"] };
 }
