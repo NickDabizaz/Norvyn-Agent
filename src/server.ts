@@ -5,6 +5,8 @@ import { readFile } from "node:fs/promises";
 import { dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
+import { Transport } from "./transport.js";
+import type { ServerNotificationEnvelope } from "../schemas/ServerNotificationEnvelope.js";
 
 export interface NorvynServer {
   readonly url: string;
@@ -13,6 +15,10 @@ export interface NorvynServer {
 
 export async function startNorvyn(workspace: string): Promise<NorvynServer> {
   const token = randomBytes(32).toString("hex");
+  const transport = await Transport.connect();
+  let thread: Promise<string> | undefined;
+  let startingTurn = false;
+  const pendingNotifications: ServerNotificationEnvelope[] = [];
   const staticDirectory = findStaticDirectory();
   const server = createServer(async (request, response) => {
     const requestUrl = new URL(request.url ?? "/", "http://127.0.0.1");
@@ -50,14 +56,40 @@ export async function startNorvyn(workspace: string): Promise<NorvynServer> {
 
   sockets.on("connection", (connection) => {
     connection.send(JSON.stringify({ type: "connection", status: "connected", workspace }));
+    connection.on("message", async (payload) => {
+      const message = JSON.parse(payload.toString()) as { type?: string; text?: string };
+      if (message.type !== "turn/start" || !message.text) return;
+      startingTurn = true;
+      try {
+        const currentThread = thread ??= transport.startThread(workspace);
+        const threadId = await currentThread;
+        const turnId = await transport.startTurn(threadId, message.text);
+        connection.send(JSON.stringify({ type: "turn/started", turnId }));
+      } finally {
+        startingTurn = false;
+        for (const notification of pendingNotifications.splice(0)) broadcast(notification);
+      }
+    });
   });
+
+  transport.on("notification", (message: ServerNotificationEnvelope) => {
+    if (startingTurn) { pendingNotifications.push(message); return; }
+    broadcast(message);
+  });
+
+  function broadcast(message: ServerNotificationEnvelope) {
+    const params = message.params as { delta?: string; turn?: { id: string } } | undefined;
+    const event = message.method === "item/agentMessage/delta" ? { type: "agent/message/delta", delta: params?.delta } :
+      message.method === "turn/completed" ? { type: "turn/completed", turnId: params?.turn?.id } : undefined;
+    if (event) for (const connection of sockets.clients) connection.send(JSON.stringify(event));
+  }
 
   await listen(server);
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Norvyn could not determine its local address.");
 
   const url = `http://127.0.0.1:${address.port}/?token=${token}`;
-  return { url, close: () => close(server, sockets) };
+  return { url, close: async () => { transport.close(); await close(server, sockets); } };
 }
 
 function findStaticDirectory(): string {

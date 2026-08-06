@@ -11,8 +11,9 @@
   "scripts": {
     "build": "npm run build:client && tsup src/cli.ts --format esm --out-dir dist",
     "build:client": "vite build --outDir dist/public",
-    "prepack": "npm run build",
-    "pretest": "npm run build",
+    "generate:protocol": "codex app-server generate-ts --out ./schemas",
+    "prepack": "npm run generate:protocol && npm run build",
+    "pretest": "npm run generate:protocol && npm run build",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"

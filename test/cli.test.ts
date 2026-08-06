@@ -85,11 +85,27 @@ test("stopping Norvyn closes its local server", async () => {
   await expect(fetch(url)).rejects.toThrow();
 });
 
+test("a Browser Turn creates a Thread and streams the Provider reply", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "norvyn-workspace-"));
+  temporaryWorkspaces.push(workspace);
+  const child = startCli(workspace);
+  runningProcesses.push(child);
+  const url = await firstLine(child.stdout!);
+
+  const events = await startTurn(url, "Say hello");
+
+  expect(events).toEqual([
+    { type: "turn/started", turnId: "turn-thread-1" },
+    { type: "agent/message/delta", delta: "Hello" },
+    { type: "turn/completed", turnId: "turn-thread-1" },
+  ]);
+});
+
 function startCli(workspace: string): ReturnType<typeof spawn> {
   const sourceRoot = process.cwd();
   return spawn(process.execPath, [join(sourceRoot, "dist", "cli.js"), "--no-open"], {
     cwd: workspace,
-    env: process.env,
+    env: { ...process.env, NORVYN_PROVIDER_COMMAND: process.execPath, NORVYN_PROVIDER_ARGUMENTS: JSON.stringify([join(sourceRoot, "test", "fixtures", "fake-provider.mjs")]) },
     stdio: ["ignore", "pipe", "pipe"],
   });
 }
@@ -123,6 +139,25 @@ function connect(httpUrl: string): Promise<unknown> {
     socket.once("message", (message) => {
       resolve(JSON.parse(message.toString()));
       socket.close();
+    });
+    socket.once("error", reject);
+  });
+}
+
+function startTurn(httpUrl: string, text: string): Promise<unknown[]> {
+  const socketUrl = new URL(httpUrl);
+  socketUrl.protocol = "ws:";
+  socketUrl.pathname = "/socket";
+  return new Promise((resolve, reject) => {
+    const events: unknown[] = [];
+    const socket = new WebSocket(socketUrl);
+    socket.on("message", (message) => {
+      const event = JSON.parse(message.toString());
+      if (event.type === "connection") socket.send(JSON.stringify({ type: "turn/start", text }));
+      else {
+        events.push(event);
+        if (event.type === "turn/completed") { socket.close(); resolve(events); }
+      }
     });
     socket.once("error", reject);
   });
