@@ -6,9 +6,10 @@ dist/
 build/
 *.tsbuildinfo
 
-# Generated protocol types (produced by `codex app-server generate-json-schema`)
+# Generated protocol types (produced by `codex app-server generate-ts`)
 # Kept out of the repo so they always match the locally installed Codex CLI.
 src/**/generated/
+schemas/
 
 # Local configuration and secrets
 .env
