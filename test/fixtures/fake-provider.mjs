@@ -1,5 +1,15 @@
 import readline from "node:readline";
 
+if (process.argv[2] === "--version") {
+  process.stdout.write("codex-cli 0.146.1\n");
+  process.exit(0);
+}
+
+if (process.argv[2] === "login" && process.argv[3] === "status") {
+  process.stderr.write("Logged in using ChatGPT\n");
+  process.exit(0);
+}
+
 let initialized = false;
 let startedThread = false;
 let threadCount = 0;

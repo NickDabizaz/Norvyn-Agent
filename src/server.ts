@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
 import { Transport } from "./transport.js";
 import type { ServerNotificationEnvelope } from "../schemas/ServerNotificationEnvelope.js";
+import { checkPreflight } from "./preflight.js";
 
 export interface NorvynServer {
   readonly url: string;
@@ -15,7 +16,8 @@ export interface NorvynServer {
 
 export async function startNorvyn(workspace: string): Promise<NorvynServer> {
   const token = randomBytes(32).toString("hex");
-  const transport = await Transport.connect();
+  const preflight = await checkPreflight();
+  const transport = preflight.ok ? await Transport.connect() : undefined;
   let thread: Promise<string> | undefined;
   let startingTurn = false;
   const pendingNotifications: ServerNotificationEnvelope[] = [];
@@ -55,10 +57,12 @@ export async function startNorvyn(workspace: string): Promise<NorvynServer> {
   });
 
   sockets.on("connection", (connection) => {
-    connection.send(JSON.stringify({ type: "connection", status: "connected", workspace }));
+    connection.send(JSON.stringify({ type: "connection", status: transport ? "connected" : "disconnected", workspace }));
+    if (!preflight.ok) connection.send(JSON.stringify({ type: "preflight/failed", message: preflight.message }));
     connection.on("message", async (payload) => {
       const message = JSON.parse(payload.toString()) as { type?: string; text?: string };
       if (message.type !== "turn/start" || !message.text) return;
+      if (!transport) return;
       startingTurn = true;
       try {
         const currentThread = thread ??= transport.startThread(workspace);
@@ -72,7 +76,7 @@ export async function startNorvyn(workspace: string): Promise<NorvynServer> {
     });
   });
 
-  transport.on("notification", (message: ServerNotificationEnvelope) => {
+  transport?.on("notification", (message: ServerNotificationEnvelope) => {
     if (startingTurn) { pendingNotifications.push(message); return; }
     broadcast(message);
   });
@@ -89,7 +93,7 @@ export async function startNorvyn(workspace: string): Promise<NorvynServer> {
   if (!address || typeof address === "string") throw new Error("Norvyn could not determine its local address.");
 
   const url = `http://127.0.0.1:${address.port}/?token=${token}`;
-  return { url, close: async () => { transport.close(); await close(server, sockets); } };
+  return { url, close: async () => { transport?.close(); await close(server, sockets); } };
 }
 
 function findStaticDirectory(): string {

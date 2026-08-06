@@ -5,6 +5,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { afterEach, expect, test } from "vitest";
 import WebSocket from "ws";
+import { providerLaunch } from "../src/transport.js";
 
 const runningProcesses: ReturnType<typeof spawn>[] = [];
 const temporaryWorkspaces: string[] = [];
@@ -101,11 +102,73 @@ test("a Browser Turn creates a Thread and streams the Provider reply", async () 
   ]);
 });
 
-function startCli(workspace: string): ReturnType<typeof spawn> {
+test("Norvyn accepts a Local Session status written to stderr by the Codex CLI", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "norvyn-workspace-"));
+  temporaryWorkspaces.push(workspace);
+  const child = startCli(workspace, { NORVYN_SKIP_PREFLIGHT: undefined });
+  runningProcesses.push(child);
+
+  const event = await connect(await firstLine(child.stdout!));
+
+  expect(event).toEqual({ type: "connection", status: "connected", workspace });
+});
+
+test("Windows starts the Codex app-server through the command launcher", () => {
+  expect(providerLaunch({}, "win32")).toEqual({
+    command: "cmd.exe",
+    args: ["/d", "/s", "/c", "codex app-server"],
+  });
+});
+
+test("Browser receives an install step when the Codex CLI is missing", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "norvyn-workspace-"));
+  temporaryWorkspaces.push(workspace);
+  const child = startCli(workspace, { NORVYN_SKIP_PREFLIGHT: undefined, NORVYN_PROVIDER_COMMAND: "norvyn-missing-codex" });
+  runningProcesses.push(child);
+
+  const events = await connectAll(await firstLine(child.stdout!));
+
+  expect(events).toEqual(expect.arrayContaining([
+    { type: "connection", status: "disconnected", workspace },
+    { type: "preflight/failed", message: "Codex CLI is not installed. Install it with: npm install -g @openai/codex@latest" },
+  ]));
+});
+
+test("Browser receives installed and required versions when the Codex CLI is too old", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "norvyn-workspace-"));
+  temporaryWorkspaces.push(workspace);
+  const child = startCli(workspace, fakeCodex("old"));
+  runningProcesses.push(child);
+
+  const events = await connectAll(await firstLine(child.stdout!));
+
+  expect(events).toEqual([
+    { type: "connection", status: "disconnected", workspace },
+    { type: "preflight/failed", message: "Codex CLI 0.1.0 is too old. Norvyn requires 0.146.1, so supported models are unavailable. Update with: npm install -g @openai/codex@latest" },
+  ]);
+});
+
+test("Browser tells the user to run codex login when there is no Local Session", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "norvyn-workspace-"));
+  temporaryWorkspaces.push(workspace);
+  const child = startCli(workspace, fakeCodex("signed-out"));
+  runningProcesses.push(child);
+
+  const events = await connectAll(await firstLine(child.stdout!));
+
+  expect(events).toEqual([
+    { type: "connection", status: "disconnected", workspace },
+    { type: "preflight/failed", message: "No Local Session was found. Sign in with: codex login" },
+  ]);
+});
+
+function startCli(workspace: string, environment: NodeJS.ProcessEnv = {}): ReturnType<typeof spawn> {
   const sourceRoot = process.cwd();
+  const env: NodeJS.ProcessEnv = { ...process.env, NORVYN_SKIP_PREFLIGHT: "1", NORVYN_PROVIDER_COMMAND: process.execPath, NORVYN_PROVIDER_ARGUMENTS: JSON.stringify([join(sourceRoot, "test", "fixtures", "fake-provider.mjs")]), ...environment };
+  for (const [key, value] of Object.entries(env)) if (value === undefined) delete env[key];
   return spawn(process.execPath, [join(sourceRoot, "dist", "cli.js"), "--no-open"], {
     cwd: workspace,
-    env: { ...process.env, NORVYN_PROVIDER_COMMAND: process.execPath, NORVYN_PROVIDER_ARGUMENTS: JSON.stringify([join(sourceRoot, "test", "fixtures", "fake-provider.mjs")]) },
+    env,
     stdio: ["ignore", "pipe", "pipe"],
   });
 }
@@ -142,6 +205,30 @@ function connect(httpUrl: string): Promise<unknown> {
     });
     socket.once("error", reject);
   });
+}
+
+function connectAll(httpUrl: string): Promise<unknown[]> {
+  const socketUrl = new URL(httpUrl);
+  socketUrl.protocol = "ws:";
+  socketUrl.pathname = "/socket";
+  return new Promise((resolve, reject) => {
+    const events: unknown[] = [];
+    const socket = new WebSocket(socketUrl);
+    socket.on("message", (message) => {
+      events.push(JSON.parse(message.toString()));
+      if (events.length === 2) { socket.close(); resolve(events); }
+    });
+    socket.once("error", reject);
+  });
+}
+
+function fakeCodex(mode: "old" | "signed-out"): NodeJS.ProcessEnv {
+  const sourceRoot = process.cwd();
+  return {
+    NORVYN_SKIP_PREFLIGHT: undefined,
+    NORVYN_PROVIDER_COMMAND: process.execPath,
+    NORVYN_PROVIDER_ARGUMENTS: JSON.stringify([join(sourceRoot, "test", "fixtures", "fake-codex.mjs"), mode]),
+  };
 }
 
 function startTurn(httpUrl: string, text: string): Promise<unknown[]> {
