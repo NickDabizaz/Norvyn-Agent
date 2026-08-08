@@ -60,3 +60,10 @@ What no Access Mode can widen: only the Workspace is writable, and the agent has
 no network access. Access Mode governs *what gets asked*; the Boundary governs
 *what is possible at all*, so raising the former never breaches the latter.
 _Avoid_: Sandbox, guardrails, restrictions
+
+### Configuration
+
+**User Settings**:
+Persistent local preferences that configure Norvyn across Chats. They never
+contain Thread history, Provider credentials, or an Access Mode default.
+_Avoid_: Account settings, cloud settings
