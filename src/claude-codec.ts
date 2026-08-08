@@ -18,7 +18,8 @@ export type ClaudeEvent =
   | { kind: "userMessage"; itemId: string; text: string }
   | { kind: "toolStarted"; call: ClaudeToolCall }
   | { kind: "toolResult"; id: string; output: string; success: boolean }
-  | { kind: "result"; error?: string };
+  /** `denied` names the tools the Provider refused to run under the Turn's Access Mode. */
+  | { kind: "result"; error?: string; denied: string[] };
 
 /**
  * Decodes one line of the Provider's stream. One line can carry several events, because a single
@@ -27,7 +28,8 @@ export type ClaudeEvent =
 export function decodeClaudeEvents(input: unknown): ClaudeEvent[] {
   const value = record(input);
   if (!value) return [];
-  if (value.type === "result") return [{ kind: "result", error: resultError(value) }];
+  if (value.type === "result")
+    return [{ kind: "result", error: resultError(value), denied: deniedTools(value) }];
   if (value.type !== "assistant" && value.type !== "user") return [];
 
   const message = record(value.message);
@@ -88,6 +90,16 @@ export function claudeToolItem(
     success: status === "inProgress" ? null : status === "completed",
     durationMs: null,
   };
+}
+
+/**
+ * Tool calls the Provider refused. Only the tool's name is taken — its arguments can carry Workspace
+ * content, and nothing downstream needs them to explain the refusal.
+ */
+function deniedTools(value: Record<string, unknown>): string[] {
+  if (!Array.isArray(value.permission_denials)) return [];
+  const names = value.permission_denials.map((entry) => text(record(entry)?.tool_name)).filter(Boolean);
+  return [...new Set(names as string[])];
 }
 
 function resultError(value: Record<string, unknown>): string | undefined {

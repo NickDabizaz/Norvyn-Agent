@@ -93,8 +93,17 @@ test("one Provider line can carry reasoning, text, tool calls, and results; anyt
   ).toEqual([{ kind: "toolResult", id: "tool-1", output: "ok", success: true }]);
 
   expect(decodeClaudeEvents({ type: "result", subtype: "success", is_error: false })).toEqual([
-    { kind: "result", error: undefined },
+    { kind: "result", error: undefined, denied: [] },
   ]);
+  expect(
+    decodeClaudeEvents({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      // Only the tool name is kept; the arguments can carry Workspace content.
+      permission_denials: [{ tool_name: "Bash", tool_input: { command: "rm -rf ." } }],
+    }),
+  ).toEqual([{ kind: "result", error: undefined, denied: ["Bash"] }]);
   expect(decodeClaudeEvents({ type: "system", subtype: "init" })).toEqual([]);
   expect(decodeClaudeEvents({ type: "rate_limit_event" })).toEqual([]);
   expect(decodeClaudeEvents("not an object")).toEqual([]);
@@ -146,6 +155,40 @@ test("Claude tool calls reach the browser as tool activity, and a failed result 
 
   app.send({ type: "turn/start", chatId: connection.chat.id, text: "claude-error" });
   expect(await app.next("turn/error")).toMatchObject({ terminal: true });
+  app.close();
+});
+
+test("a Chat's Access Mode reaches the Claude process, and raising it relaunches the Thread", async () => {
+  const app = await launch();
+  const connection = await app.next("connection");
+
+  app.send({ type: "turn/start", chatId: connection.chat.id, text: "claude-inspect" });
+  const manual = JSON.parse((await app.next("agent/message/delta")).delta) as { args: string[] };
+  // A Thread is Manual until deliberately raised, so the first launch must be the strictest mode.
+  expect(manual.args.join(" ")).toContain("--permission-mode manual");
+  await app.next("turn/completed");
+
+  app.send({ type: "chat/access-mode", chatId: connection.chat.id, accessMode: "auto-edit" });
+  await app.next("chat/updated");
+  app.send({ type: "turn/start", chatId: connection.chat.id, text: "claude-inspect" });
+  const raised = JSON.parse((await app.next("agent/message/delta")).delta) as { args: string[] };
+
+  expect(raised.args.join(" ")).toContain("--permission-mode acceptEdits");
+  // The mode is a launch flag, so raising it must resume the same Thread rather than start a new one.
+  expect(raised.args.join(" ")).toContain("--resume");
+  app.close();
+});
+
+test("tool calls the Provider denied are reported instead of passing as a silent success", async () => {
+  const app = await launch();
+  const connection = await app.next("connection");
+
+  app.send({ type: "turn/start", chatId: connection.chat.id, text: "claude-denied" });
+  const error = await app.next("turn/error");
+
+  expect(error.message).toContain("Bash");
+  expect(error.message).toMatch(/Access Mode/i);
+  await app.next("turn/completed");
   app.close();
 });
 

@@ -9,9 +9,9 @@ import type { ServerNotificationEnvelope } from "../schemas/ServerNotificationEn
 import type { ThreadItem } from "../schemas/v2/ThreadItem.js";
 import type { Turn } from "../schemas/v2/Turn.js";
 import { safeExecutablePath } from "./preflight.js";
-import type { ReasoningEffort, TurnAttachment } from "./protocol.js";
+import type { AccessMode, ReasoningEffort, TurnAttachment } from "./protocol.js";
 import { NorvynThreadStore, type StoredThread } from "./thread-store.js";
-import type { ModelSource, ThreadStore, Transport } from "./transport.js";
+import type { ModelSource, ThreadStore, Transport, TurnRequest } from "./transport.js";
 import { claudeToolItem, decodeClaudeEvents, type ClaudeToolCall } from "./claude-codec.js";
 
 /**
@@ -23,13 +23,19 @@ export const CLAUDE_MODELS = ["claude-opus-5", "claude-sonnet-5", "claude-haiku-
 
 export type ClaudePermissionMode = "manual" | "acceptEdits" | "bypassPermissions";
 
+/**
+ * Access Mode as the Claude Code CLI expresses it. Manual is the strictest mode the CLI offers, but
+ * headless it *denies* where CONTEXT.md says Manual *asks* — the CLI has no channel to ask on. Denials
+ * are reported rather than swallowed; see ADR-0005.
+ */
+const permissionModes: Record<AccessMode, ClaudePermissionMode> = {
+  manual: "manual",
+  "auto-edit": "acceptEdits",
+  auto: "bypassPermissions",
+};
+
 export interface ClaudeAdapterOptions {
   claudePath?: string;
-  /**
-   * Chosen once per process, because the CLI takes it as a launch flag. Defaults to `manual`, matching
-   * the CONTEXT.md rule that a Thread is Manual until deliberately raised.
-   */
-  permissionMode?: ClaudePermissionMode;
   /** Directory holding the Provider's rollout files. Defaults to `~/.claude/projects`. */
   rolloutRoot?: string;
 }
@@ -39,6 +45,7 @@ interface ThreadProcess {
   workspace: string;
   model: string;
   effort: ReasoningEffort;
+  accessMode: AccessMode;
   /** True once the CLI has accepted this Thread, so later launches must `--resume` rather than create. */
   persisted: boolean;
   process?: ChildProcessWithoutNullStreams;
@@ -58,14 +65,12 @@ export class ClaudeAdapter extends EventEmitter implements Transport, ThreadStor
   private readonly threads = new Map<string, ThreadProcess>();
   private readonly store: NorvynThreadStore;
   private readonly claudePath: string;
-  private readonly permissionMode: ClaudePermissionMode;
   private readonly rolloutRoot: string;
   private closing = false;
 
   private constructor(options: ClaudeAdapterOptions) {
     super();
     this.claudePath = options.claudePath?.trim() || "claude";
-    this.permissionMode = options.permissionMode ?? "manual";
     this.rolloutRoot = options.rolloutRoot ?? join(homedir(), ".claude", "projects");
     this.store = new NorvynThreadStore({
       modelProvider: "anthropic",
@@ -98,6 +103,7 @@ export class ClaudeAdapter extends EventEmitter implements Transport, ThreadStor
       workspace,
       model,
       effort: "medium",
+      accessMode: "manual",
       persisted: false,
       turnItems: [],
       pendingTools: new Map(),
@@ -106,19 +112,22 @@ export class ClaudeAdapter extends EventEmitter implements Transport, ThreadStor
     return threadId;
   }
 
-  async startTurn(
-    threadId: string,
-    text: string,
-    model: string,
-    effort: ReasoningEffort,
-    attachments: TurnAttachment[] = [],
-  ): Promise<string> {
+  async startTurn({
+    threadId,
+    text,
+    model,
+    effort,
+    accessMode,
+    attachments = [],
+  }: TurnRequest): Promise<string> {
     const thread = await this.threadProcess(threadId);
     if (thread.turnId) throw new Error("A Turn is already running in this Chat.");
-    // Model and effort are launch flags, so changing either means relaunching against the same thread.
-    if (thread.model !== model || thread.effort !== effort) {
+    // Model, Reasoning Effort, and Access Mode are all launch flags, so changing any of them means
+    // relaunching — against the same Thread, which `--resume` makes invisible to the user.
+    if (thread.model !== model || thread.effort !== effort || thread.accessMode !== accessMode) {
       thread.model = model;
       thread.effort = effort;
+      thread.accessMode = accessMode;
       this.stop(thread);
     }
     this.ensureProcess(thread);
@@ -188,6 +197,7 @@ export class ClaudeAdapter extends EventEmitter implements Transport, ThreadStor
       workspace: stored.workspace,
       model: stored.model,
       effort: "medium",
+      accessMode: "manual",
       // A Thread read back from the index was started by an earlier run, so the CLI already holds it.
       persisted: true,
       turnItems: [],
@@ -201,7 +211,7 @@ export class ClaudeAdapter extends EventEmitter implements Transport, ThreadStor
     if (thread.process && thread.process.exitCode === null) return;
     const { command, args } = claudeLaunch({
       claudePath: this.claudePath,
-      permissionMode: this.permissionMode,
+      permissionMode: permissionModes[thread.accessMode],
       model: thread.model,
       effort: thread.effort,
       threadId: thread.threadId,
@@ -269,15 +279,26 @@ export class ClaudeAdapter extends EventEmitter implements Transport, ThreadStor
         }
         case "userMessage":
           break;
-        case "result":
+        case "result": {
+          const denied = deniedMessage(event.denied, thread.accessMode);
+          // A Provider failure carries the Provider's own words, so it goes through the server's
+          // translation. A denial is Norvyn's own sentence and is shown as written.
           if (event.error)
             this.notify("error", {
               ...context,
               willRetry: false,
               error: { message: event.error, codexErrorInfo: null, additionalDetails: null },
             });
+          else if (denied)
+            this.notify("error", {
+              ...context,
+              willRetry: false,
+              explained: true,
+              error: { message: denied, codexErrorInfo: null, additionalDetails: null },
+            });
           this.completeTurn(thread, event.error ? "failed" : "completed");
           break;
+        }
       }
     }
   }
@@ -396,6 +417,19 @@ export class ClaudeAdapter extends EventEmitter implements Transport, ThreadStor
     }
     return undefined;
   }
+}
+
+/**
+ * A Turn where the Provider refused tool calls completed, but did less than it was asked. Saying so is
+ * the closest this Transport gets to an approval prompt: it names what was refused and what would let
+ * it through, rather than letting the Turn read as a plain success.
+ */
+function deniedMessage(denied: string[], accessMode: AccessMode): string | undefined {
+  if (!denied.length) return undefined;
+  const tools = denied.join(", ");
+  return accessMode === "auto"
+    ? `The Provider declined to run: ${tools}.`
+    : `This Chat's Access Mode declined: ${tools}. The Claude Provider cannot ask for approval mid-Turn, so raise Access Mode and retry to allow these.`;
 }
 
 function transcriptTurn(id: string, item: ThreadItem): Turn {

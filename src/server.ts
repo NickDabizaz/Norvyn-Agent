@@ -866,7 +866,14 @@ async function startRuntime(
     startingTurns += 1;
     try {
       try {
-        chat.turnId = await adapter.startTurn(chat.threadId, text, chat.model, chat.effort, attachments);
+        chat.turnId = await adapter.startTurn({
+          threadId: chat.threadId,
+          text,
+          model: chat.model,
+          effort: chat.effort,
+          accessMode: chat.accessMode,
+          attachments,
+        });
       } catch (error) {
         if (catalog.unverifiedModels.includes(chat.model) && error instanceof ProviderBoundaryError)
           throw new Error(
@@ -989,7 +996,9 @@ async function startRuntime(
       if (chat && terminal) chat.turnId = undefined;
       broadcast({
         type: "turn/error",
-        message: explainError(error),
+        // `explained` is an Adapter's claim that it already produced a user-facing sentence, so it is
+        // shown verbatim. Without it the message is raw Provider text and must be translated first.
+        message: params?.explained === true ? String(error.message) : explainError(error),
         chatId: chat?.id,
         threadId,
         turnId: params?.turnId,

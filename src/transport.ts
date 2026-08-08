@@ -11,7 +11,7 @@ import type { ThreadResumeResponse } from "../schemas/v2/ThreadResumeResponse.js
 import type { ThreadStartParams } from "../schemas/v2/ThreadStartParams.js";
 import type { TurnStartParams } from "../schemas/v2/TurnStartParams.js";
 import type { UserInput } from "../schemas/v2/UserInput.js";
-import type { ReasoningEffort, ThreadCapabilities, TurnAttachment } from "./protocol.js";
+import type { AccessMode, ReasoningEffort, ThreadCapabilities, TurnAttachment } from "./protocol.js";
 import { safeExecutablePath } from "./preflight.js";
 import {
   decodeModelListResult,
@@ -34,15 +34,23 @@ type OutgoingRpcMessage = {
 };
 type PendingResponse = { resolve(value: unknown): void; reject(error: Error): void };
 
+/**
+ * Everything a Provider needs to start one Turn. These travelled as five positional arguments until
+ * the Claude Provider needed Access Mode too — Codex resolves approvals through Provider requests and
+ * never reads it, but a Provider configured by launch flags cannot ask, so it has to be told.
+ */
+export interface TurnRequest {
+  threadId: string;
+  text: string;
+  model: string;
+  effort: ReasoningEffort;
+  accessMode: AccessMode;
+  attachments?: TurnAttachment[];
+}
+
 export interface Transport {
   startThread(workspace: string, model: string): Promise<string>;
-  startTurn(
-    threadId: string,
-    text: string,
-    model: string,
-    effort: ReasoningEffort,
-    attachments?: TurnAttachment[],
-  ): Promise<string>;
+  startTurn(request: TurnRequest): Promise<string>;
   interruptTurn(threadId: string, turnId: string): Promise<void>;
   answerRequest(id: RpcId, result: unknown): void;
   restart(): Promise<void>;
@@ -136,13 +144,12 @@ export class CodexAdapter extends EventEmitter implements Transport, ThreadStore
     return result.thread.id;
   }
 
-  async startTurn(
-    threadId: string,
-    text: string,
-    model: string,
-    effort: ReasoningEffort,
-    attachments: TurnAttachment[] = [],
-  ): Promise<string> {
+  /**
+   * `accessMode` is deliberately unread: Codex is always launched `on-request` and resolves each
+   * approval through a Provider request, so the Chat's Access Mode is applied where those requests are
+   * answered rather than here.
+   */
+  async startTurn({ threadId, text, model, effort, attachments = [] }: TurnRequest): Promise<string> {
     const input: UserInput[] = [{ type: "text", text, text_elements: [] }];
     for (const attachment of attachments) {
       if (attachment.kind === "image") input.push({ type: "image", url: attachment.dataUrl });

@@ -42,6 +42,17 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const text = message.message?.content?.find((part) => part.type === "text")?.text ?? "";
   const id = `msg_${++messageCount}`;
 
+  if (text === "claude-denied") {
+    emit({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      result: "Stopped",
+      permission_denials: [{ tool_name: "Bash", tool_input: { command: "npm test" } }],
+    });
+    return;
+  }
+
   if (text === "claude-error") {
     emit({ type: "result", subtype: "error_during_execution", is_error: true, result: "Turn failed." });
     return;

@@ -18,11 +18,11 @@ JSON event stream over stdio, not an app-server exposing JSON-RPC, so the Claude
   namespace.
 
 Access Mode maps onto `--permission-mode` (`manual` → `manual`, `auto-edit` → `acceptEdits`, `auto` →
-`bypassPermissions`), though nothing carries a Chat's Access Mode to the Transport yet — see Consequences. The
-Boundary fares worse: the writable half is only approximated, by launching the process with the Workspace as
-its working directory and passing no `--add-dir`, and Claude Code has no network-access switch equivalent to
-Codex's `sandbox_workspace_write.network_access` at all. Both are recorded below as gaps rather than papered
-over, and `resumeThread` reports the weaker guarantees it can actually keep rather than Codex's.
+`bypassPermissions`), with the caveat about asking in Consequences. The Boundary fares worse: the writable
+half is only approximated, by launching the process with the Workspace as its working directory and passing no
+`--add-dir`, and Claude Code has no network-access switch equivalent to Codex's
+`sandbox_workspace_write.network_access` at all. Both are recorded below as gaps rather than papered over, and
+`resumeThread` reports the weaker guarantees it can actually keep rather than Codex's.
 
 ## Claude is the Provider that forces a Norvyn-owned ThreadStore
 
@@ -95,12 +95,19 @@ not enumerate what the account may use, so the Claude Adapter advertises a curat
 unverified-custom-model path in User Settings carries anything outside it. A model the subscription does not
 cover fails at the Turn rather than being filtered out beforehand.
 
-Approvals do not reach this Transport at all. A headless `claude` decides tool use from `--permission-mode`
-alone and offers no channel to ask, so the Adapter raises no approval requests and `answerRequest` is a no-op.
-The seam compounds it: `Transport` never receives a Chat's Access Mode — Codex passes `on-request` and
-resolves approvals through requests instead — so the Adapter launches at `manual` unconditionally, the Access
-Mode a Thread starts at. Making Access Mode reach this Provider means widening the seam to carry it and
-finding an ask channel; both are follow-up work, and until then Manual on Claude denies where it should ask.
+Access Mode reaches this Provider as a launch flag, not as a conversation. `Transport.startTurn` takes a
+`TurnRequest` carrying the Chat's Access Mode; Codex ignores it, because it launches `on-request` and settles
+each approval through a Provider request, while the Claude Adapter maps it onto `--permission-mode` (`manual`,
+`acceptEdits`, `bypassPermissions`) and relaunches the Thread when it changes — invisibly, since `--resume`
+reattaches the same session.
+
+What does not exist is the asking. A headless `claude` decides from that flag alone and exposes no channel to
+raise an approval, so the Adapter raises none and `answerRequest` is a no-op. **Manual therefore denies where
+CONTEXT.md says it asks.** Rather than let that read as a silent success, the Adapter reports it: the CLI's
+`result` event carries `permission_denials`, and a Turn that had tool calls refused ends with a message naming
+the refused tools and saying that raising Access Mode and retrying is what would let them through. Only the
+tool names are used — their arguments can carry Workspace content. That is the honest floor available today; a
+real prompt needs an upstream mechanism the CLI does not have.
 
 Streaming is per message rather than per token. The CLI can emit token deltas under
 `--include-partial-messages`, but reconciling those against the whole-message events that follow them is

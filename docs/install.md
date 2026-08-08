@@ -32,11 +32,14 @@ Provider's CLI and reloads its models. A Chat stays with the Provider that start
 per Provider rather than merged: switching Provider changes which Chats you see, and switching back brings the
 others into view again. See [ADR-0005](adr/0005-claude-code-cli-is-the-claude-transport.md).
 
-Two things differ on the Claude Provider today. Branching a Chat is unavailable, because Claude Code cannot
-fork a conversation at a chosen Turn. And Norvyn keeps its own small index of Claude Chats — identifiers,
-Workspace, name, pinned and archived state — at `%USERPROFILE%\.norvyn\threads.json`, because Claude Code
-exposes no way to list or organise its sessions. Transcripts are not copied there; deleting a Chat removes
-Norvyn's record of it and leaves Claude Code's own transcript file untouched.
+Three things differ on the Claude Provider today. Access Mode still governs what the agent may do, but Claude
+Code cannot pause mid-Turn to ask: on **Manual** it declines file writes and commands outright instead of
+prompting. When that happens the Turn ends with a message naming what was declined, and raising Access Mode
+and retrying is what allows it. Branching a Chat is unavailable, because Claude Code cannot fork a
+conversation at a chosen Turn. And Norvyn keeps its own small index of Claude Chats — identifiers, Workspace,
+name, pinned and archived state — at `%USERPROFILE%\.norvyn\threads.json`, because Claude Code exposes no way
+to list or organise its sessions. Transcripts are not copied there; deleting a Chat removes Norvyn's record of
+it and leaves Claude Code's own transcript file untouched.
 
 ## Troubleshooting
 
