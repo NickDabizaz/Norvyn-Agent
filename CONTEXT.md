@@ -46,6 +46,13 @@ agent may touch on that Thread. Every Thread has exactly one; it defaults to the
 directory Norvyn was launched from.
 _Avoid_: Project, folder, cwd, working directory
 
+**Workspace History**:
+The set of Provider-owned Chats anchored to the same Workspace. Archiving it
+hides those Chats from active History while keeping them recoverable; deleting
+it permanently removes those Chat records. Neither action deletes or modifies
+the Workspace directory or any file inside it.
+_Avoid_: Delete Workspace, delete project, remove folder
+
 ### Permission
 
 **Access Mode**:

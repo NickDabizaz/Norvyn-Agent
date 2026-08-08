@@ -21,7 +21,7 @@ afterEach(async () => {
   await Promise.all(temporaryWorkspaces.splice(0).map((workspace) => rm(workspace, { recursive: true, force: true })));
 });
 
-test("starting Norvyn opens a token-gated local server for the launched Workspace", async () => {
+test("starting Norvyn bootstraps POST-backed browser authorization without query parameters", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "norvyn-workspace-"));
   temporaryWorkspaces.push(workspace);
 
@@ -30,7 +30,8 @@ test("starting Norvyn opens a token-gated local server for the launched Workspac
 
   const url = await firstLine(child.stdout!);
 
-  expect(url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/\?token=[a-f0-9]{64}$/);
+  expect(url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/#access=[a-f0-9]{64}$/);
+  expect(new URL(url).search).toBe("");
 
   const response = await fetch(url);
   expect(response.status).toBe(200);
@@ -39,7 +40,7 @@ test("starting Norvyn opens a token-gated local server for the launched Workspac
   expect(event).toMatchObject({ type: "connection", status: "connected", workspace });
 });
 
-test("Norvyn refuses WebSocket connections without the current token", async () => {
+test("Norvyn refuses WebSocket connections without POST-created browser authorization", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "norvyn-workspace-"));
   temporaryWorkspaces.push(workspace);
 
@@ -47,10 +48,8 @@ test("Norvyn refuses WebSocket connections without the current token", async () 
   runningProcesses.push(child);
 
   const url = await firstLine(child.stdout!);
-  const rejectedUrl = new URL(url);
-  rejectedUrl.searchParams.set("token", "malformed");
-
-  await expect(connect(rejectedUrl.toString())).rejects.toThrow("Unexpected server response: 401");
+  await expect(connectSocket(url)).rejects.toThrow("Unexpected server response: 401");
+  expect((await createBrowserSession(url, "malformed")).status).toBe(401);
 });
 
 test("a token from an earlier Norvyn run cannot open the next run", async () => {
@@ -67,11 +66,8 @@ test("a token from an earlier Norvyn run cannot open the next run", async () => 
   runningProcesses.push(second);
   const secondUrl = await firstLine(second.stdout!);
 
-  expect(new URL(secondUrl).searchParams.get("token")).not.toBe(new URL(firstUrl).searchParams.get("token"));
-
-  const staleUrl = new URL(secondUrl);
-  staleUrl.searchParams.set("token", new URL(firstUrl).searchParams.get("token")!);
-  await expect(connect(staleUrl.toString())).rejects.toThrow("Unexpected server response: 401");
+  expect(accessFrom(secondUrl)).not.toBe(accessFrom(firstUrl));
+  expect((await createBrowserSession(secondUrl, accessFrom(firstUrl))).status).toBe(401);
 });
 
 test("stopping Norvyn closes its local server", async () => {
@@ -189,13 +185,18 @@ function firstLine(stream: NodeJS.ReadableStream): Promise<string> {
   });
 }
 
-function connect(httpUrl: string): Promise<unknown> {
+async function connect(httpUrl: string): Promise<unknown> {
+  return connectSocket(httpUrl, await authorizeBrowser(httpUrl));
+}
+
+function connectSocket(httpUrl: string, cookie?: string): Promise<unknown> {
   const socketUrl = new URL(httpUrl);
   socketUrl.protocol = "ws:";
   socketUrl.pathname = "/socket";
+  socketUrl.hash = "";
 
   return new Promise((resolve, reject) => {
-    const socket = new WebSocket(socketUrl);
+    const socket = new WebSocket(socketUrl, { headers: cookie ? { cookie } : undefined });
     socket.once("message", (message) => {
       resolve(JSON.parse(message.toString()));
       socket.close();
@@ -204,13 +205,15 @@ function connect(httpUrl: string): Promise<unknown> {
   });
 }
 
-function connectAll(httpUrl: string): Promise<unknown[]> {
+async function connectAll(httpUrl: string): Promise<unknown[]> {
+  const cookie = await authorizeBrowser(httpUrl);
   const socketUrl = new URL(httpUrl);
   socketUrl.protocol = "ws:";
   socketUrl.pathname = "/socket";
+  socketUrl.hash = "";
   return new Promise((resolve, reject) => {
     const events: unknown[] = [];
-    const socket = new WebSocket(socketUrl);
+    const socket = new WebSocket(socketUrl, { headers: { cookie } });
     socket.on("message", (message) => {
       events.push(JSON.parse(message.toString()));
       if (events.length === 2) { socket.close(); resolve(events); }
@@ -228,13 +231,15 @@ function fakeCodex(mode: "old" | "signed-out"): NodeJS.ProcessEnv {
   };
 }
 
-function startTurn(httpUrl: string, text: string): Promise<unknown[]> {
+async function startTurn(httpUrl: string, text: string): Promise<unknown[]> {
+  const cookie = await authorizeBrowser(httpUrl);
   const socketUrl = new URL(httpUrl);
   socketUrl.protocol = "ws:";
   socketUrl.pathname = "/socket";
+  socketUrl.hash = "";
   return new Promise((resolve, reject) => {
     const events: unknown[] = [];
-    const socket = new WebSocket(socketUrl);
+    const socket = new WebSocket(socketUrl, { headers: { cookie } });
     socket.on("message", (message) => {
       const event = JSON.parse(message.toString());
       if (event.type === "connection") socket.send(JSON.stringify({ type: "turn/start", text }));
@@ -245,4 +250,26 @@ function startTurn(httpUrl: string, text: string): Promise<unknown[]> {
     });
     socket.once("error", reject);
   });
+}
+
+function accessFrom(httpUrl: string): string {
+  const access = new URLSearchParams(new URL(httpUrl).hash.slice(1)).get("access");
+  if (!access) throw new Error("Norvyn did not provide Browser bootstrap access.");
+  return access;
+}
+
+function createBrowserSession(httpUrl: string, access = accessFrom(httpUrl)): Promise<Response> {
+  return fetch(`${new URL(httpUrl).origin}/session`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ access }),
+  });
+}
+
+async function authorizeBrowser(httpUrl: string): Promise<string> {
+  const response = await createBrowserSession(httpUrl);
+  if (!response.ok) throw new Error(`Browser Session failed: ${response.status}`);
+  const cookie = response.headers.get("set-cookie")?.split(";", 1)[0];
+  if (!cookie) throw new Error("Browser Session cookie was not issued.");
+  return cookie;
 }

@@ -5,8 +5,9 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
 import { afterEach, describe, expect, test } from "vitest";
 import WebSocket from "ws";
-import { clampPaneWidth, filterThreads } from "../src/client/main.js";
+import { clampPaneWidth, failTurnTranscript, filterThreads, groupThreadsByWorkspace, modelOption, shouldSubmitComposer, visibleGroupThreads, visibleWorkspaces, workspaceName } from "../src/client/main.js";
 import { DEFAULT_MODELS } from "../src/models.js";
+import { folderPickerLaunch } from "../src/server.js";
 
 const children: ChildProcessWithoutNullStreams[] = [];
 const paths: string[] = [];
@@ -24,7 +25,7 @@ test("history is newest-first, derives Workspaces, and resumes a complete transc
 
   app.send({ type: "chat/open", threadId: "history-new" });
   const opened = await app.next("chat/selected");
-  expect(opened.chat).toMatchObject({ threadId: "history-new", workspace: "C:\\workspaces\\alpha", accessMode: "manual" });
+  expect(opened.chat).toMatchObject({ threadId: "history-new", workspace: "C:\\workspaces\\alpha", model: DEFAULT_MODELS[0], accessMode: "manual" });
   expect(opened.transcript[0].items.map((item: any) => item.text ?? item.content?.[0]?.text)).toEqual(["Previous question", "Previous answer"]);
 
   app.send({ type: "turn/start", chatId: "history-new", text: "Continue" });
@@ -38,6 +39,7 @@ test("default model, reasoning subscription, and the immutable Workspace Boundar
   const connection = await app.next("connection");
   expect(connection.chat).toMatchObject({ workspace, model: DEFAULT_MODELS[0], accessMode: "manual" });
   expect(connection.models).toEqual([...DEFAULT_MODELS]);
+  expect(connection.models).not.toContain("hidden-model");
   expect(connection.models.every((model: string) => !model.startsWith("gpt-5.4"))).toBe(true);
 
   app.send({ type: "turn/start", chatId: connection.chat.id, text: "inspect-boundary" });
@@ -186,6 +188,29 @@ test("usage limits are explained with optional reset details and other failures 
   app.close();
 });
 
+test("an unsupported ChatGPT model ends the Turn with an actionable error", async () => {
+  const app = await launch();
+  const chat = (await app.next("connection")).chat;
+  app.send({ type: "turn/start", chatId: chat.id, text: "unsupported-model" });
+  await app.next("turn/started");
+  expect(await app.next("turn/error")).toMatchObject({
+    chatId: chat.id,
+    terminal: true,
+    message: "This model isn't available with your ChatGPT account. Choose another available model and retry.",
+  });
+  app.close();
+});
+
+test("a rejected Provider request never exposes raw JSON in Chat", async () => {
+  const app = await launch();
+  const chat = (await app.next("connection")).chat;
+  app.send({ type: "turn/start", chatId: chat.id, text: "request-json-error" });
+  expect((await app.next("error")).message).toBe("Provider rejected this request.");
+  app.send({ type: "turn/start", chatId: chat.id, text: "request-malformed-json-error" });
+  expect((await app.next("error")).message).toBe("The Provider rejected this request. Check your setup and retry.");
+  app.close();
+});
+
 test("an unexpected Provider exit fails the in-flight Turn, re-handshakes, and recovers", async () => {
   const app = await launch();
   const chat = (await app.next("connection")).chat;
@@ -219,13 +244,67 @@ test("History search and divider resizing enforce the frontend interaction rules
   expect(clampPaneWidth(300, 1000)).toBe(300);
 });
 
+test("History groups Chats by Workspace while preserving newest-first order", () => {
+  const threads = [
+    { id: "1", title: "Newest Alpha", preview: "one", workspace: "C:\\workspaces\\alpha", updatedAt: 3, createdAt: 1 },
+    { id: "2", title: "Beta", preview: "two", workspace: "C:\\workspaces\\beta", updatedAt: 2, createdAt: 1 },
+    { id: "3", title: "Older Alpha", preview: "three", workspace: "C:\\workspaces\\alpha", updatedAt: 1, createdAt: 1 },
+  ];
+  expect(groupThreadsByWorkspace(threads).map((group) => ({ workspace: group.workspace, ids: group.threads.map((thread) => thread.id) }))).toEqual([
+    { workspace: "C:\\workspaces\\alpha", ids: ["1", "3"] },
+    { workspace: "C:\\workspaces\\beta", ids: ["2"] },
+  ]);
+  expect(workspaceName("C:\\workspaces\\alpha")).toBe("alpha");
+  expect(workspaceName("/home/norvyn/project")).toBe("project");
+  const manyThreads = Array.from({ length: 7 }, (_, index) => ({ ...threads[0], id: String(index) }));
+  expect(visibleGroupThreads(manyThreads, false)).toHaveLength(5);
+  expect(visibleGroupThreads(manyThreads, true)).toHaveLength(7);
+  expect(visibleWorkspaces(["one", "two", "three", "four", "five", "six"])).toEqual(["one", "two", "three", "four", "five"]);
+  const folderPicker = folderPickerLaunch("win32");
+  expect(folderPicker.command).toBe("powershell.exe");
+  expect(folderPicker.args).toEqual(expect.arrayContaining(["-STA", "-Command"]));
+  expect(folderPicker.args.at(-1)).toContain("FolderBrowserDialog");
+  expect(() => folderPickerLaunch("linux")).toThrow("Windows only");
+  expect(modelOption("gpt-5.6-terra")).toMatchObject({ label: "GPT-5.6 Terra", detail: "Balanced" });
+  expect(shouldSubmitComposer("Enter", false, false)).toBe(true);
+  expect(shouldSubmitComposer("Enter", true, false)).toBe(false);
+  expect(shouldSubmitComposer("Enter", false, true)).toBe(false);
+  expect(failTurnTranscript([
+    { kind: "user", id: "user", text: "Hello" },
+    { kind: "assistant", id: "assistant", text: "" },
+  ], "Unavailable", "error")).toEqual([
+    { kind: "user", id: "user", text: "Hello" },
+    { kind: "error", id: "error", text: "Unavailable" },
+  ]);
+});
+
+test("Workspace History can be archived or permanently deleted without touching Workspace files", async () => {
+  const app = await launch();
+  await app.next("connection");
+  await app.next("history");
+
+  app.send({ type: "history/workspace/archive", workspace: "C:\\workspaces\\alpha" });
+  expect(await app.next("history/workspace/removed")).toMatchObject({ action: "archived", count: 1, threadIds: ["history-new"] });
+  expect((await app.next("history")).workspaces).toEqual(["C:\\workspaces\\beta"]);
+
+  app.send({ type: "history/workspace/delete", workspace: "C:\\workspaces\\beta" });
+  expect(await app.next("history/workspace/removed")).toMatchObject({ action: "deleted", count: 1, threadIds: ["history-old"] });
+  expect((await app.next("history")).workspaces).toEqual([]);
+  app.close();
+});
+
 async function launch(workspace?: string, extraEnv: Record<string, string> = {}) {
   const appWorkspace = workspace ?? await temporaryDirectory("norvyn-workspace-");
   const child = startCli(appWorkspace, extraEnv);
   children.push(child);
   const url = await firstLine(child.stdout);
-  const socketUrl = new URL(url); socketUrl.protocol = "ws:"; socketUrl.pathname = "/socket";
-  const socket = new WebSocket(socketUrl);
+  const access = new URLSearchParams(new URL(url).hash.slice(1)).get("access");
+  if (!access) throw new Error("No Browser bootstrap access.");
+  const sessionResponse = await fetch(`${new URL(url).origin}/session`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ access }) });
+  const cookie = sessionResponse.headers.get("set-cookie")?.split(";", 1)[0];
+  if (!sessionResponse.ok || !cookie) throw new Error("Browser Session was not established.");
+  const socketUrl = new URL(url); socketUrl.protocol = "ws:"; socketUrl.pathname = "/socket"; socketUrl.hash = "";
+  const socket = new WebSocket(socketUrl, { headers: { cookie } });
   const events: any[] = [];
   const waiters: (() => void)[] = [];
   socket.on("message", (payload) => { events.push(JSON.parse(payload.toString())); for (const wake of waiters.splice(0)) wake(); });

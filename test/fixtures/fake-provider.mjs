@@ -20,7 +20,7 @@ let pendingApproval;
 
 if (failAfterCrash && marker && existsSync(marker)) process.exit(1);
 
-const seededThreads = [
+let seededThreads = [
   thread("history-new", "Newest architecture chat", "C:\\workspaces\\alpha", 200),
   thread("history-old", "Older testing chat", "C:\\workspaces\\beta", 100),
 ];
@@ -36,9 +36,23 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     return;
   }
   if (!initialized) throw new Error(`${message.method} before initialized`);
+  if (message.method === "model/list") {
+    reply(message.id, { data: [
+      model("gpt-5.6-sol", "GPT-5.6 Sol", true),
+      model("gpt-5.6-terra", "GPT-5.6 Terra"),
+      model("gpt-5.6-luna", "GPT-5.6 Luna"),
+      { ...model("hidden-model", "Hidden model"), hidden: true },
+    ], nextCursor: null });
+    return;
+  }
   if (message.method === "thread/list") {
     const query = message.params.searchTerm?.toLowerCase();
     reply(message.id, { data: query ? seededThreads.filter((item) => (item.name || item.preview).toLowerCase().includes(query)) : seededThreads, nextCursor: null, backwardsCursor: null });
+    return;
+  }
+  if (message.method === "thread/archive" || message.method === "thread/delete") {
+    seededThreads = seededThreads.filter((item) => item.id !== message.params.threadId);
+    reply(message.id, {});
     return;
   }
   if (message.method === "thread/resume") {
@@ -58,6 +72,14 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   }
   if (message.method === "turn/start") {
     const text = message.params.input[0].text;
+    if (text === "request-json-error") {
+      reject(message.id, { message: "{\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Provider rejected this request.\"}}" });
+      return;
+    }
+    if (text === "request-malformed-json-error") {
+      reject(message.id, { message: "{\"status\":500,\"error\":" });
+      return;
+    }
     const turnId = `turn-${message.params.threadId}-${Date.now()}`;
     reply(message.id, { turn: { id: turnId } });
     if (text === "crash") {
@@ -66,6 +88,10 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       return;
     }
     if (text === "slow") return;
+    if (text === "unsupported-model") {
+      notify("error", { threadId: message.params.threadId, turnId, willRetry: false, error: { message: "{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'gpt-5.6' model is not supported when using Codex with a ChatGPT account.\"}}", codexErrorInfo: "badRequest", additionalDetails: null } });
+      return;
+    }
     if (text === "inspect-boundary") return complete(turnId, message.params.threadId, JSON.stringify({ thread: lastThreadStart, turn: message.params }));
     if (text === "reasoning-tools") {
       notify("item/reasoning/summaryTextDelta", { threadId: message.params.threadId, turnId, itemId: "reason-1", delta: "Checked the Workspace.", summaryIndex: 0 });
@@ -112,7 +138,11 @@ function complete(turnId, threadId, text) {
 }
 function completedTurn(id) { return { id, items: [], itemsView: { type: "full" }, status: "completed", error: null, startedAt: 1, completedAt: 2, durationMs: 1000 }; }
 function reply(id, result) { process.stdout.write(`${JSON.stringify({ id, result })}\n`); }
+function reject(id, error) { process.stdout.write(`${JSON.stringify({ id, error })}\n`); }
 function notify(method, params) { process.stdout.write(`${JSON.stringify({ method, params })}\n`); }
+function model(id, displayName, isDefault = false) {
+  return { id, model: id, upgrade: null, upgradeInfo: null, availabilityNux: null, displayName, description: "", modelSpecialty: null, hidden: false, supportedReasoningEfforts: [], defaultReasoningEffort: "medium", inputModalities: ["text"], supportsPersonality: false, additionalSpeedTiers: [], serviceTiers: [], defaultServiceTier: null, isDefault };
+}
 function thread(id, title, cwd, updatedAt) {
   return { id, sessionId: id, forkedFromId: null, parentThreadId: null, preview: title, ephemeral: false, isPinned: false, modelProvider: "openai", createdAt: updatedAt - 10, updatedAt, recencyAt: updatedAt, status: { type: "idle" }, path: null, cwd, cliVersion: "1.0", source: "appServer", threadSource: null, agentNickname: null, agentRole: null, gitInfo: null, name: title, turns: [] };
 }

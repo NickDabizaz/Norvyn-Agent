@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { createInterface } from "node:readline";
 import type { InitializeParams } from "../schemas/InitializeParams.js";
+import type { ModelListResponse } from "../schemas/v2/ModelListResponse.js";
 import type { ServerNotificationEnvelope } from "../schemas/ServerNotificationEnvelope.js";
 import type { ServerRequest } from "../schemas/ServerRequest.js";
 import type { Thread } from "../schemas/v2/Thread.js";
@@ -33,7 +34,16 @@ export interface ThreadStore {
   resumeThread(threadId: string): Promise<ThreadResumeResponse>;
 }
 
-export class CodexAdapter extends EventEmitter implements Transport, ThreadStore {
+export interface ModelSource {
+  listModels(): Promise<string[]>;
+}
+
+export interface ThreadOrganizer {
+  archiveThread(threadId: string): Promise<void>;
+  deleteThread(threadId: string): Promise<void>;
+}
+
+export class CodexAdapter extends EventEmitter implements Transport, ThreadStore, ModelSource, ThreadOrganizer {
   private process?: ChildProcessWithoutNullStreams;
   private readonly responses = new Map<RpcId, PendingResponse>();
   private nextId = 1;
@@ -105,6 +115,26 @@ export class CodexAdapter extends EventEmitter implements Transport, ThreadStore
     const result = await this.request("thread/resume", { threadId, approvalPolicy: "on-request", approvalsReviewer: "user" }) as ThreadResumeResponse;
     this.knownThreads.add(threadId);
     return result;
+  }
+
+  async listModels(): Promise<string[]> {
+    const models: string[] = [];
+    let cursor: string | null = null;
+    do {
+      const response = await this.request("model/list", { cursor, limit: 100, includeHidden: false }) as ModelListResponse;
+      models.push(...response.data.filter((model) => !model.hidden).map((model) => model.model));
+      cursor = response.nextCursor;
+    } while (cursor);
+    return [...new Set(models)];
+  }
+
+  async archiveThread(threadId: string): Promise<void> {
+    await this.request("thread/archive", { threadId });
+  }
+
+  async deleteThread(threadId: string): Promise<void> {
+    await this.request("thread/delete", { threadId });
+    this.knownThreads.delete(threadId);
   }
 
   answerRequest(id: RpcId, result: unknown): void { this.send({ id, result }); }

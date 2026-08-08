@@ -1,11 +1,12 @@
-import { createServer, type Server } from "node:http";
+import { createServer, type IncomingMessage, type Server } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
-import { CodexAdapter, type ThreadStore, type Transport } from "./transport.js";
+import { CodexAdapter, type ThreadOrganizer, type ThreadStore, type Transport } from "./transport.js";
 import { loadModelCatalog } from "./models.js";
 import { checkPreflight } from "./preflight.js";
 import type { ServerNotificationEnvelope } from "../schemas/ServerNotificationEnvelope.js";
@@ -31,28 +32,34 @@ type BrowserMessage =
   | { type: "chat/new"; workspace?: string }
   | { type: "chat/open"; threadId: string }
   | { type: "chat/workspace"; chatId: string; workspace: string }
+  | { type: "chat/workspace/browse"; chatId: string }
   | { type: "chat/model"; chatId: string; model: string }
   | { type: "chat/access-mode"; chatId: string; accessMode: AccessMode }
+  | { type: "history/workspace/archive"; workspace: string }
+  | { type: "history/workspace/delete"; workspace: string }
   | { type: "turn/start"; chatId?: string; text: string }
   | { type: "turn/interrupt"; chatId: string }
   | { type: "approval/respond"; requestId: number | string; approved: boolean };
 
 export async function startNorvyn(workspace: string): Promise<NorvynServer> {
-  const catalog = await loadModelCatalog();
+  let catalog = await loadModelCatalog();
   const preflight = await checkPreflight();
-  if (!preflight.ok) return startWithAdapters(workspace, undefined, undefined, catalog, preflight.message);
+  if (!preflight.ok) return startWithAdapters(workspace, undefined, undefined, undefined, catalog, preflight.message);
   const adapter = await CodexAdapter.connect();
-  return startWithAdapters(workspace, adapter, adapter, catalog);
+  catalog = await loadModelCatalog(await adapter.listModels());
+  return startWithAdapters(workspace, adapter, adapter, adapter, catalog);
 }
 
 async function startWithAdapters(
   workspace: string,
   transport: Transport | undefined,
   threadStore: ThreadStore | undefined,
+  threadOrganizer: ThreadOrganizer | undefined,
   catalog: Awaited<ReturnType<typeof loadModelCatalog>>,
   preflightError?: string,
 ): Promise<NorvynServer> {
   const token = randomBytes(32).toString("hex");
+  const browserSessions = new Set<string>();
   const chats = new Map<string, ChatState>();
   const approvals = new Map<number | string, { timeout: NodeJS.Timeout }>();
   const approvalTimeoutMs = Number(process.env.NORVYN_APPROVAL_TIMEOUT_MS ?? 30_000);
@@ -63,6 +70,20 @@ async function startWithAdapters(
   const staticDirectory = findStaticDirectory();
   const server = createServer(async (request, response) => {
     const requestUrl = new URL(request.url ?? "/", "http://127.0.0.1");
+    if (request.method === "POST" && requestUrl.pathname === "/session") {
+      const payload = await readJsonBody(request).catch(() => undefined) as { access?: unknown } | undefined;
+      if (!payload || typeof payload.access !== "string" || !matchesToken(payload.access, token)) {
+        response.writeHead(401, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" }).end(JSON.stringify({ message: "Browser access was rejected." }));
+        return;
+      }
+      const browserSession = randomBytes(32).toString("hex");
+      browserSessions.add(browserSession);
+      response.writeHead(204, {
+        "cache-control": "no-store",
+        "set-cookie": `norvyn_session=${browserSession}; HttpOnly; SameSite=Strict; Path=/`,
+      }).end();
+      return;
+    }
     if (request.method !== "GET") { response.writeHead(404).end(); return; }
     try {
       const relativePath = requestUrl.pathname === "/" ? "index.html" : requestUrl.pathname.slice(1);
@@ -77,7 +98,8 @@ async function startWithAdapters(
   const sockets = new WebSocketServer({ noServer: true });
   server.on("upgrade", (request, socket, head) => {
     const requestUrl = new URL(request.url ?? "/", "http://127.0.0.1");
-    if (requestUrl.pathname !== "/socket" || !matchesToken(requestUrl.searchParams.get("token"), token)) {
+    const browserSession = cookieValue(request.headers.cookie, "norvyn_session");
+    if (requestUrl.pathname !== "/socket" || !browserSession || !browserSessions.has(browserSession)) {
       socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
       socket.destroy();
       return;
@@ -94,13 +116,25 @@ async function startWithAdapters(
       if (preflightError) send(connection, { type: "preflight/failed", message: preflightError });
     }
     connection.on("message", (payload) => void handleMessage(connection, JSON.parse(payload.toString()) as BrowserMessage).catch((error) => {
-      send(connection, { type: "error", message: error instanceof Error ? error.message : String(error) });
+      send(connection, { type: "error", message: browserErrorMessage(error) });
     }));
   });
 
   async function handleMessage(connection: WebSocket, message: BrowserMessage): Promise<void> {
-    if (!transport || !threadStore) throw new Error(preflightError ?? "The Provider is unavailable.");
+    if (!transport || !threadStore || !threadOrganizer) throw new Error(preflightError ?? "The Provider is unavailable.");
     if (message.type === "history/list") { await sendHistory(connection, message.search); return; }
+    if (message.type === "history/workspace/archive" || message.type === "history/workspace/delete") {
+      const threads = (await threadStore.listThreads()).filter((thread) => String(thread.cwd) === message.workspace);
+      if (!threads.length) throw new Error("No active Chats were found for this Workspace History.");
+      for (const thread of threads) {
+        if (message.type === "history/workspace/archive") await threadOrganizer.archiveThread(thread.id);
+        else await threadOrganizer.deleteThread(thread.id);
+      }
+      const action = message.type === "history/workspace/archive" ? "archived" : "deleted";
+      send(connection, { type: "history/workspace/removed", workspace: message.workspace, threadIds: threads.map((thread) => thread.id), count: threads.length, action });
+      await sendHistory(connection);
+      return;
+    }
     if (message.type === "chat/new") {
       const chat = newChat(message.workspace);
       broadcast({ type: "chat/selected", chat, transcript: [] });
@@ -108,7 +142,8 @@ async function startWithAdapters(
     }
     if (message.type === "chat/open") {
       const resumed = await threadStore.resumeThread(message.threadId);
-      const chat: ChatState = { id: resumed.thread.id, threadId: resumed.thread.id, workspace: String(resumed.thread.cwd), model: resumed.model || catalog.defaultModel, accessMode: "manual" };
+      const resumedModel = resumed.model || catalog.defaultModel;
+      const chat: ChatState = { id: resumed.thread.id, threadId: resumed.thread.id, workspace: String(resumed.thread.cwd), model: catalog.models.includes(resumedModel) ? resumedModel : catalog.defaultModel, accessMode: "manual" };
       chats.set(chat.id, chat);
       broadcast({ type: "chat/selected", chat, transcript: resumed.thread.turns });
       return;
@@ -119,6 +154,17 @@ async function startWithAdapters(
       const workspaceStat = await stat(message.workspace).catch(() => undefined);
       if (!workspaceStat?.isDirectory()) throw new Error(`Workspace does not exist or is not a directory: ${message.workspace}`);
       chat.workspace = resolve(message.workspace);
+      broadcast({ type: "chat/updated", chat });
+      return;
+    }
+    if (message.type === "chat/workspace/browse") {
+      const chat = requiredChat(message.chatId);
+      if (chat.threadId) throw new Error("A Chat's Workspace cannot change after its Thread has started.");
+      const selectedWorkspace = await browseWorkspace();
+      if (!selectedWorkspace) { send(connection, { type: "workspace/browse/cancelled" }); return; }
+      const workspaceStat = await stat(selectedWorkspace).catch(() => undefined);
+      if (!workspaceStat?.isDirectory()) throw new Error(`Workspace does not exist or is not a directory: ${selectedWorkspace}`);
+      chat.workspace = resolve(selectedWorkspace);
       broadcast({ type: "chat/updated", chat });
       return;
     }
@@ -175,7 +221,7 @@ async function startWithAdapters(
       chat.turnId = undefined;
     }
   });
-  transport?.on("unavailable", (error) => broadcast({ type: "provider/unavailable", message: error.message }));
+  transport?.on("unavailable", (error) => broadcast({ type: "provider/unavailable", message: browserErrorMessage(error) }));
 
   function handleProviderRequest(request: ServerRequest): void {
     if (!transport) return;
@@ -216,7 +262,11 @@ async function startWithAdapters(
       broadcast({ type: "turn/completed", chatId: chat?.id, ...params });
     } else if (message.method === "error") {
       const error = (params?.error ?? {}) as TurnError;
-      broadcast({ type: "turn/error", message: explainError(error), threadId: params?.threadId, turnId: params?.turnId });
+      const threadId = String(params?.threadId ?? "");
+      const chat = [...chats.values()].find((candidate) => candidate.threadId === threadId);
+      const terminal = params?.willRetry !== true;
+      if (chat && terminal) chat.turnId = undefined;
+      broadcast({ type: "turn/error", message: explainError(error), chatId: chat?.id, threadId, turnId: params?.turnId, terminal });
     }
   }
 
@@ -243,7 +293,7 @@ async function startWithAdapters(
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Norvyn could not determine its local address.");
   return {
-    url: `http://127.0.0.1:${address.port}/?token=${token}`,
+    url: `http://127.0.0.1:${address.port}/#access=${token}`,
     close: async () => {
       for (const approval of approvals.values()) clearTimeout(approval.timeout);
       transport?.close();
@@ -264,7 +314,34 @@ function explainError(error: TurnError): string {
   if (error.codexErrorInfo === "usageLimitExceeded") {
     return `You've reached your ChatGPT plan usage limit.${error.additionalDetails ? ` ${error.additionalDetails}` : ""}`;
   }
-  return error.message;
+  const providerMessage = readableProviderMessage(error.message);
+  if (error.codexErrorInfo === "badRequest" && /model.+not supported.+ChatGPT account/i.test(providerMessage)) {
+    return "This model isn't available with your ChatGPT account. Choose another available model and retry.";
+  }
+  return providerMessage;
+}
+
+function browserErrorMessage(error: unknown): string {
+  return readableProviderMessage(error instanceof Error ? error.message : String(error));
+}
+
+function readableProviderMessage(message: string): string {
+  let candidate = message.trim();
+  for (let depth = 0; depth < 3; depth += 1) {
+    try {
+      const parsed = JSON.parse(candidate) as unknown;
+      if (typeof parsed === "string") { candidate = parsed.trim(); continue; }
+      if (!parsed || typeof parsed !== "object") return "The Provider rejected this request. Check your setup and retry.";
+      const record = parsed as { error?: unknown; message?: unknown };
+      const nestedError = record.error && typeof record.error === "object" ? record.error as { message?: unknown } : undefined;
+      const nestedMessage = typeof nestedError?.message === "string" ? nestedError.message : typeof record.message === "string" ? record.message : undefined;
+      if (!nestedMessage) return "The Provider rejected this request. Check your setup and retry.";
+      candidate = nestedMessage.trim();
+    } catch {
+      return /^[\[{]/.test(candidate) ? "The Provider rejected this request. Check your setup and retry." : candidate;
+    }
+  }
+  return /^[\[{]/.test(candidate) ? "The Provider rejected this request. Check your setup and retry." : candidate;
 }
 
 function send(connection: WebSocket, event: unknown): void {
@@ -280,6 +357,46 @@ function contentType(filePath: string): string {
 }
 function matchesToken(candidate: string | null, token: string): boolean {
   return Boolean(candidate && candidate.length === token.length && timingSafeEqual(Buffer.from(candidate), Buffer.from(token)));
+}
+export function folderPickerLaunch(platform = process.platform): { command: string; args: string[] } {
+  if (platform !== "win32") throw new Error("Browsing for a Workspace is currently available on Windows only.");
+  const script = [
+    "Add-Type -AssemblyName System.Windows.Forms",
+    "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog",
+    "$dialog.Description = 'Choose a Norvyn Workspace'",
+    "try { if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($dialog.SelectedPath) } } finally { $dialog.Dispose() }",
+  ].join("; ");
+  return { command: "powershell.exe", args: ["-NoProfile", "-STA", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script] };
+}
+function browseWorkspace(): Promise<string | undefined> {
+  const launch = folderPickerLaunch();
+  return new Promise((resolveWorkspace, reject) => {
+    execFile(launch.command, launch.args, { encoding: "utf8" }, (error, stdout) => {
+      if (error) { reject(new Error("Windows could not open the folder picker.")); return; }
+      resolveWorkspace(stdout.trim() || undefined);
+    });
+  });
+}
+function cookieValue(header: string | undefined, name: string): string | undefined {
+  return header?.split(";").map((part) => part.trim().split("=", 2)).find(([key]) => key === name)?.[1];
+}
+function readJsonBody(request: IncomingMessage): Promise<unknown> {
+  return new Promise((resolveBody, reject) => {
+    let body = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk: string) => {
+      body += chunk;
+      if (body.length > 4_096) {
+        reject(new Error("Request body is too large."));
+        request.destroy();
+      }
+    });
+    request.on("end", () => {
+      try { resolveBody(JSON.parse(body)); }
+      catch (error) { reject(error); }
+    });
+    request.on("error", reject);
+  });
 }
 function listen(server: Server): Promise<void> {
   return new Promise((resolveListen, reject) => {
