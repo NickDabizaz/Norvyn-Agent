@@ -7,7 +7,7 @@ import { afterEach, describe, expect, test } from "vitest";
 import WebSocket from "ws";
 import { clampPaneWidth } from "../src/client/app-shell.js";
 import { shouldSubmitComposer } from "../src/client/composer.js";
-import { failTurnTranscript } from "../src/client/conversation.js";
+import { appendReasoningDelta, failTurnTranscript } from "../src/client/conversation.js";
 import {
   filterThreads,
   groupThreadsByWorkspace,
@@ -65,7 +65,17 @@ test("default model, reasoning subscription, and the immutable Workspace Boundar
   expect(connection.models).not.toContain("hidden-model");
   expect(connection.models.every((model: string) => !model.startsWith("gpt-5.4"))).toBe(true);
 
-  app.send({ type: "turn/start", chatId: connection.chat.id, text: "inspect-boundary" });
+  app.send({ type: "chat/effort", chatId: connection.chat.id, effort: "high" });
+  await app.next("chat/updated");
+  app.send({
+    type: "turn/start",
+    chatId: connection.chat.id,
+    text: "inspect-boundary",
+    attachments: [
+      { kind: "image", name: "proof.png", mimeType: "image/png", dataUrl: "data:image/png;base64,YQ==" },
+      { kind: "text", name: "notes.md", mimeType: "text/markdown", text: "ground truth" },
+    ],
+  });
   const delta = await app.next("agent/message/delta");
   const received = JSON.parse(delta.delta);
   expect(received.thread).toMatchObject({
@@ -78,7 +88,12 @@ test("default model, reasoning subscription, and the immutable Workspace Boundar
     writable_roots: [workspace],
     network_access: false,
   });
-  expect(received.turn).toMatchObject({ model: PROVIDER_MODELS[0], summary: "detailed" });
+  expect(received.turn).toMatchObject({ model: PROVIDER_MODELS[0], effort: "high", summary: "detailed" });
+  expect(received.turn.input).toEqual([
+    { type: "text", text: "inspect-boundary", text_elements: [] },
+    { type: "image", url: "data:image/png;base64,YQ==" },
+    expect.objectContaining({ type: "text", text: expect.stringContaining("ground truth") }),
+  ]);
   app.close();
 });
 
@@ -166,6 +181,7 @@ describe.each([
     if (mode === "manual") expect(response.delta).toBe("file:decline;command:accept");
     if (mode === "auto-edit") expect(response.delta).toBe("file:accept;command:accept");
     if (mode === "auto") expect(response.delta).toBe("file:accept;command:accept");
+    expect(await app.next("turn/completed")).not.toHaveProperty("turn");
     app.close();
   });
 });
@@ -211,6 +227,18 @@ test("reasoning and tool activity stay ordered, compact, and carry full output",
   });
   expect(relevant[3]).toMatchObject({ status: "completed", item: { aggregatedOutput: "all green" } });
   app.close();
+});
+
+test("streaming reasoning is inserted before the pending assistant response", () => {
+  const entries = appendReasoningDelta(
+    [
+      { kind: "user", id: "user", text: "Question", complete: true },
+      { kind: "assistant", id: "assistant", text: "", complete: false },
+    ],
+    "reasoning",
+    "Thinking first",
+  );
+  expect(entries.map((entry) => entry.kind)).toEqual(["user", "reasoning", "assistant"]);
 });
 
 test("stopping a Turn preserves the Chat and allows an immediate next Turn", async () => {

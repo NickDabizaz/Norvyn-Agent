@@ -10,7 +10,8 @@ import type { ThreadListParams } from "../schemas/v2/ThreadListParams.js";
 import type { ThreadResumeResponse } from "../schemas/v2/ThreadResumeResponse.js";
 import type { ThreadStartParams } from "../schemas/v2/ThreadStartParams.js";
 import type { TurnStartParams } from "../schemas/v2/TurnStartParams.js";
-import type { ThreadCapabilities } from "./protocol.js";
+import type { UserInput } from "../schemas/v2/UserInput.js";
+import type { ReasoningEffort, ThreadCapabilities, TurnAttachment } from "./protocol.js";
 import { safeExecutablePath } from "./preflight.js";
 import {
   decodeModelListResult,
@@ -35,7 +36,13 @@ type PendingResponse = { resolve(value: unknown): void; reject(error: Error): vo
 
 export interface Transport {
   startThread(workspace: string, model: string): Promise<string>;
-  startTurn(threadId: string, text: string, model: string): Promise<string>;
+  startTurn(
+    threadId: string,
+    text: string,
+    model: string,
+    effort: ReasoningEffort,
+    attachments?: TurnAttachment[],
+  ): Promise<string>;
   interruptTurn(threadId: string, turnId: string): Promise<void>;
   answerRequest(id: RpcId, result: unknown): void;
   restart(): Promise<void>;
@@ -129,11 +136,28 @@ export class CodexAdapter extends EventEmitter implements Transport, ThreadStore
     return result.thread.id;
   }
 
-  async startTurn(threadId: string, text: string, model: string): Promise<string> {
+  async startTurn(
+    threadId: string,
+    text: string,
+    model: string,
+    effort: ReasoningEffort,
+    attachments: TurnAttachment[] = [],
+  ): Promise<string> {
+    const input: UserInput[] = [{ type: "text", text, text_elements: [] }];
+    for (const attachment of attachments) {
+      if (attachment.kind === "image") input.push({ type: "image", url: attachment.dataUrl });
+      else
+        input.push({
+          type: "text",
+          text: `\n\n<attached-file name="${attachment.name}">\n${attachment.text}\n</attached-file>`,
+          text_elements: [],
+        });
+    }
     const params: TurnStartParams = {
       threadId,
-      input: [{ type: "text", text, text_elements: [] }],
+      input,
       model,
+      effort,
       summary: "detailed",
       approvalPolicy: "on-request",
       approvalsReviewer: "user",

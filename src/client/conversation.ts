@@ -53,11 +53,25 @@ export function appendReasoningDelta(
   delta: string,
 ): TranscriptEntry[] {
   const found = entries.findIndex((entry) => entry.kind === "reasoning" && entry.id === id);
-  return found < 0
-    ? [...entries, { kind: "reasoning", id, text: delta }]
-    : entries.map((entry, index) =>
-        index === found && entry.kind === "reasoning" ? { ...entry, text: entry.text + delta } : entry,
-      );
+  if (found < 0) {
+    let pendingAssistant = -1;
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+      const entry = entries[index];
+      if (entry.kind === "assistant" && entry.complete === false) {
+        pendingAssistant = index;
+        break;
+      }
+    }
+    if (pendingAssistant < 0) return [...entries, { kind: "reasoning", id, text: delta }];
+    return [
+      ...entries.slice(0, pendingAssistant),
+      { kind: "reasoning", id, text: delta },
+      ...entries.slice(pendingAssistant),
+    ];
+  }
+  return entries.map((entry, index) =>
+    index === found && entry.kind === "reasoning" ? { ...entry, text: entry.text + delta } : entry,
+  );
 }
 
 export function upsertTool(

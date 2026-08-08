@@ -14,6 +14,7 @@ export class ChatRegistry {
       id: `new-${this.nextChat++}`,
       workspace,
       model: defaultModel,
+      effort: "medium",
       accessMode: "manual",
       turns: [],
     };

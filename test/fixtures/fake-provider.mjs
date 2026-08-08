@@ -295,6 +295,13 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       return;
     }
     const turnId = `turn-${message.params.threadId}-${Date.now()}`;
+    if (text === "delayed-start") {
+      setTimeout(() => {
+        reply(message.id, { turn: { id: turnId } });
+        complete(turnId, message.params.threadId, "Started after delay", text);
+      }, 750);
+      return;
+    }
     reply(message.id, { turn: { id: turnId } });
     if (text === "crash") {
       if (failAfterCrash && marker) writeFileSync(marker, "crashed");

@@ -17,7 +17,7 @@ let pickerCalls = 0;
 const server = await startNorvyn(process.cwd(), {
   port: 4178,
   sessionToken: () => "browser-test-access",
-  preflight: async () => ({ ok: true, kind: "ready", codexPath: "fake-codex", version: "0.146.1" }),
+  preflight: async () => ({ ok: true, kind: "ready", providerPath: "fake-codex", version: "0.146.1" }),
   connectProvider: () => CodexAdapter.connect(),
   workspacePicker: {
     available: true,

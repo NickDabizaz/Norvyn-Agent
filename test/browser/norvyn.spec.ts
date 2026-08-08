@@ -34,7 +34,7 @@ async function openNorvyn(page: Page): Promise<void> {
   browserSessionCookie = (await page.context().cookies()).find((cookie) => cookie.name === "norvyn_session");
   if (openedPages++ > 0) {
     await page.locator(".new-chat").click();
-    await expect(page.getByRole("button", { name: "Connect Folder" })).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "Start a Turn" })).toBeEnabled();
   }
 }
 
@@ -53,6 +53,121 @@ test("production UI has deterministic desktop baselines and no serious accessibi
 
   await page.setViewportSize({ width: 1440, height: 900 });
   await expect(page).toHaveScreenshot("norvyn-1440x900.png", { animations: "disabled" });
+});
+
+test("collapsed Workspace action menus stay visible and keep labels on one line", async ({ page }) => {
+  await openNorvyn(page);
+  const activeFirstToggle = page.locator(".workspace-group-toggle").first();
+  await activeFirstToggle.click();
+  await expect(activeFirstToggle).toHaveAttribute("aria-expanded", "false");
+  await page.getByRole("button", { name: "Archived" }).click();
+  await page.getByRole("button", { name: "Active" }).click();
+  await expect(page.locator(".workspace-group-toggle").first()).toHaveAttribute("aria-expanded", "true");
+  await page.getByRole("button", { name: "Archived" }).click();
+
+  const groups = page.locator(".workspace-group");
+  await expect(groups.first()).toBeVisible();
+  const toggles = groups.locator(".workspace-group-toggle");
+  await expect(toggles.first()).toHaveAttribute("aria-expanded", "true");
+
+  const lastGroup = groups.last();
+  const lastToggle = lastGroup.locator(".workspace-group-toggle");
+  await lastToggle.scrollIntoViewIfNeeded();
+  await lastToggle.click();
+  await expect(lastToggle).toHaveAttribute("aria-expanded", "false");
+
+  await lastGroup.locator(".workspace-actions summary").click();
+  const menu = lastGroup.locator(".workspace-actions-menu");
+  const deleteHistory = menu.getByRole("button", { name: "Delete History" });
+  await expect(menu).toBeVisible();
+  await expect(deleteHistory).toBeVisible();
+
+  const menuBox = await menu.boundingBox();
+  const historyBox = await page.locator(".thread-list").boundingBox();
+  expect(menuBox).not.toBeNull();
+  expect(historyBox).not.toBeNull();
+  expect(menuBox!.y).toBeGreaterThanOrEqual(historyBox!.y);
+  expect(menuBox!.y + menuBox!.height).toBeLessThanOrEqual(historyBox!.y + historyBox!.height);
+  expect(await deleteHistory.evaluate((button) => getComputedStyle(button).whiteSpace)).toBe("nowrap");
+
+  await page.getByRole("button", { name: "Active" }).click();
+  const activeLastGroup = page.locator(".workspace-group").last();
+  const activeLastToggle = activeLastGroup.locator(".workspace-group-toggle");
+  await activeLastToggle.scrollIntoViewIfNeeded();
+  await activeLastToggle.click();
+  await activeLastGroup.locator(".workspace-actions summary").click();
+
+  const activeMenu = activeLastGroup.locator(".workspace-actions-menu");
+  const archiveChats = activeMenu.getByRole("button", { name: "Archive Chats" });
+  const activeDeleteHistory = activeMenu.getByRole("button", { name: "Delete History" });
+  await expect(archiveChats).toBeVisible();
+  await expect(activeDeleteHistory).toBeVisible();
+  const activeMenuBox = await activeMenu.boundingBox();
+  const activeHistoryBox = await page.locator(".thread-list").boundingBox();
+  expect(activeMenuBox).not.toBeNull();
+  expect(activeHistoryBox).not.toBeNull();
+  expect(activeMenuBox!.y).toBeGreaterThanOrEqual(activeHistoryBox!.y);
+  expect(activeMenuBox!.y + activeMenuBox!.height).toBeLessThanOrEqual(
+    activeHistoryBox!.y + activeHistoryBox!.height,
+  );
+  expect(await archiveChats.evaluate((button) => getComputedStyle(button).whiteSpace)).toBe("nowrap");
+  expect(await activeDeleteHistory.evaluate((button) => getComputedStyle(button).whiteSpace)).toBe("nowrap");
+});
+
+test("the visible Chat composer accepts pointer focus and typing", async ({ page }) => {
+  await openNorvyn(page);
+  const composerInput = page.getByRole("textbox", { name: "Start a Turn" });
+  const inputBox = await composerInput.boundingBox();
+  expect(inputBox).not.toBeNull();
+
+  await page.mouse.click(inputBox!.x + inputBox!.width / 2, inputBox!.y + inputBox!.height / 2);
+  await expect(composerInput).toBeFocused();
+  await page.keyboard.type("pointer click works");
+  await expect(composerInput).toHaveValue("pointer click works");
+});
+
+test("Enter renders immediately and the composer accepts at most ten attachments", async ({ page }) => {
+  await openNorvyn(page);
+  await page.locator(".thread-item").filter({ hasText: "Only-one-cardinality-marker" }).click();
+  await page.locator(".new-chat").click();
+  await expect(page.getByRole("textbox", { name: "Start a Turn" })).toBeEnabled();
+  const composer = page.getByRole("textbox", { name: "Start a Turn" });
+  await composer.fill("delayed-start");
+  await page.keyboard.press("Enter");
+  await expect(page.getByText("delayed-start", { exact: true })).toBeVisible({ timeout: 500 });
+  await expect(composer).toHaveValue("");
+
+  const attachButton = page.locator(".composer .attach");
+  await expect(attachButton).toBeVisible();
+  await page.locator('input[type="file"][aria-label="Attach images or files"]').setInputFiles(
+    Array.from({ length: 10 }, (_, index) => ({
+      name: `image-${index}.png`,
+      mimeType: "image/png",
+      buffer: Buffer.from("image"),
+    })),
+  );
+  await expect(page.locator(".attachment-chip")).toHaveCount(10);
+  await expect(attachButton).toBeDisabled();
+  await expect(page.getByText("Started after delay")).toBeVisible();
+});
+
+test("approving Provider requests completes without an invalid server event", async ({ page }) => {
+  await openNorvyn(page);
+  await page.locator(".thread-item").filter({ hasText: "Only-one-cardinality-marker" }).click();
+  await page.locator(".new-chat").click();
+  await expect(page.getByRole("textbox", { name: "Start a Turn" })).toBeEnabled();
+  const composer = page.getByRole("textbox", { name: "Start a Turn" });
+  await composer.fill("approvals");
+  await page.keyboard.press("Enter");
+
+  const approval = page.locator(".approval");
+  await expect(approval.getByText("File change requested")).toBeVisible();
+  await approval.getByRole("button", { name: "Approve" }).click();
+  await expect(approval.getByText("Command requested")).toBeVisible();
+  await approval.getByRole("button", { name: "Approve" }).click();
+
+  await expect(page.getByText("file:accept;command:accept")).toBeVisible();
+  await expect(page.locator("body")).not.toContainText("invalid local server event");
 });
 
 test("long Chat stays bounded, scrolls end to end, and keeps the composer visible", async ({ page }) => {
@@ -115,7 +230,7 @@ test("History, Workspace, menus, divider, confirmations, and composer remain key
   const search = page.getByRole("textbox", { name: "Search Chats" });
   await search.fill("no-such-chat-cardinality-zero");
   await expect(page.getByText("No Chats found.")).toBeVisible();
-  const emptyWorkspaceTrigger = page.getByRole("button", { name: "Connect Folder" });
+  const emptyWorkspaceTrigger = page.locator(".workspace-path");
   await emptyWorkspaceTrigger.click();
   const emptyWorkspaceDialog = page.getByRole("dialog", { name: "Workspace picker" });
   await expect(emptyWorkspaceDialog.locator("[data-menu-option]")).toHaveCount(0);
@@ -140,7 +255,7 @@ test("History, Workspace, menus, divider, confirmations, and composer remain key
   await expect(page.locator(".workspace-group")).toHaveCount(8);
   expect(await page.locator(".workspace-group").count()).toBeGreaterThanOrEqual(6);
 
-  const workspaceTrigger = page.getByRole("button", { name: "Connect Folder" });
+  const workspaceTrigger = page.locator(".workspace-path");
   await workspaceTrigger.click();
   await expect(page.locator("[data-menu-option]")).toHaveCount(5);
   await expect(page.locator("[data-menu-option]").first()).toBeFocused();
