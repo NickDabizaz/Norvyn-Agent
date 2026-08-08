@@ -262,9 +262,8 @@ test("Connect With Codex triggers Provider-owned authentication and enters Chat 
   expect((await app.next("auth/state", (event) => event.status === "connected", 5_000)).status).toBe(
     "connected",
   );
-  expect((await app.next("connection", (event) => event.status === "connected")).chat.accessMode).toBe(
-    "manual",
-  );
+  const connected = await app.next("connection", (event) => event.status === "connected");
+  expect(connected.chat).toMatchObject({ accessMode: "manual", model: "gpt-5.6-sol" });
   app.close();
 });
 

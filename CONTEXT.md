@@ -41,6 +41,32 @@ those Chats from active History while keeping them recoverable; deleting it perm
 records. Neither action deletes or modifies the Workspace directory or any file inside it. _Avoid_: Delete
 Workspace, delete project, remove folder
 
+### Work tracking
+
+**Kanban Board**: The single work-tracking view owned by one Workspace. It contains every Work Plan for that
+Workspace, including plans created from different Chats. _Avoid_: Task board, project board
+
+**Work Plan**: A substantial user outcome tracked on a Kanban Board and linked to the Chat from which it was
+created. A Work Plan is decomposed into Work Items. _Avoid_: Task, Chat plan, Turn plan
+
+**Work Item**: One independently trackable unit of a Work Plan, with enough scope to complete and verify as a
+unit. The user-facing label may be **Task**. _Avoid_: Turn, message, card
+
+**Execution Attempt**: One attempt by one worker Chat to complete a Work Item. A Work Item retains its earlier
+attempts when retried, but has at most one active Execution Attempt. _Avoid_: Run, retry Chat, agent task
+
+**Coordinator Chat**: The Chat from which a Work Plan was created and which coordinates its Work Items and
+reports their combined outcome. Worker Chats remain separate Chats linked through Execution Attempts. _Avoid_:
+Parent task, master agent
+
+**Execution Mode**: How a Work Plan progresses: **Track Only** records work without starting worker Chats,
+**Guided** asks before starting them, and **Autonomous** starts ready work within configured limits. _Avoid_:
+Access Mode, permission mode
+
+**Workspace Lesson**: A concise, user-approved lesson learned from completed work or a resolved defect and
+made available to relevant future work in the same Workspace. It is not shared across Workspaces by default.
+_Avoid_: Global memory, Chat history, transcript memory
+
 ### Permission
 
 **Access Mode**: How much the agent may do on a Thread without stopping to ask — one of **Manual** (asks
