@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Install Norvyn, a local-first personal AI assistant for Windows." />
+    <meta name="referrer" content="no-referrer" />
+    <title>Norvyn — local-first AI for Windows</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+        background: #10140f;
+        color: #f0f2eb;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: radial-gradient(circle at 80% 5%, #c5ff6218, transparent 32rem), #10140f;
+      }
+      main {
+        width: min(72rem, calc(100% - 2rem));
+        margin: 0 auto;
+        padding: clamp(3rem, 8vw, 7rem) 0;
+      }
+      .eyebrow {
+        color: #c5ff62;
+        font:
+          700 0.78rem/1.2 ui-monospace,
+          monospace;
+        letter-spacing: 0.14em;
+      }
+      h1 {
+        max-width: 13ch;
+        margin: 0.7rem 0 1rem;
+        font-size: clamp(3rem, 9vw, 7rem);
+        line-height: 0.9;
+        letter-spacing: -0.06em;
+      }
+      .lede {
+        max-width: 45rem;
+        color: #bdc5b7;
+        font-size: clamp(1.1rem, 2vw, 1.35rem);
+        line-height: 1.6;
+      }
+      .commands {
+        display: grid;
+        gap: 0.8rem;
+        margin: 2.5rem 0;
+      }
+      .command {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        max-width: 43rem;
+        padding: 0.9rem 1rem;
+        border: 1px solid #465140;
+        border-radius: 0.7rem;
+        background: #151a14;
+      }
+      code {
+        flex: 1;
+        overflow-wrap: anywhere;
+        color: #d2ff83;
+        font:
+          600 1rem/1.5 ui-monospace,
+          monospace;
+      }
+      button {
+        border: 1px solid #697563;
+        border-radius: 0.45rem;
+        padding: 0.55rem 0.75rem;
+        color: #f0f2eb;
+        background: #1b2119;
+        cursor: pointer;
+      }
+      button:hover,
+      button:focus-visible {
+        border-color: #c5ff62;
+        outline: 2px solid #c5ff6240;
+        outline-offset: 2px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+        gap: 1rem;
+        margin-top: 4rem;
+      }
+      article {
+        padding: 1.4rem;
+        border: 1px solid #2b3128;
+        border-radius: 0.8rem;
+        background: #0d100d;
+      }
+      article h2 {
+        margin-top: 0;
+        font-size: 1.05rem;
+      }
+      article p,
+      li {
+        color: #bdc5b7;
+        line-height: 1.55;
+      }
+      a {
+        color: #c5ff62;
+        text-underline-offset: 0.2em;
+      }
+      footer {
+        margin-top: 4rem;
+        color: #899383;
+      }
+      @media (max-width: 35rem) {
+        .command {
+          align-items: stretch;
+          flex-direction: column;
+        }
+        button {
+          align-self: flex-start;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p class="eyebrow">NORVYN / WINDOWS MVP</p>
+      <h1>Your agent. Your machine.</h1>
+      <p class="lede">
+        Norvyn is a local-first browser interface for Codex. It runs on your Windows machine, anchors every
+        Chat to a Workspace you choose, and borrows your ChatGPT-backed Codex Local Session.
+      </p>
+      <div class="commands" aria-label="Installation commands">
+        <div class="command">
+          <code>npm install -g norvyn</code
+          ><button type="button" data-copy="npm install -g norvyn">Copy install</button>
+        </div>
+        <div class="command">
+          <code>norvyn</code><button type="button" data-copy="norvyn">Copy launch</button>
+        </div>
+      </div>
+      <section class="grid">
+        <article>
+          <h2>Requirements</h2>
+          <ul>
+            <li>Windows 10 or 11</li>
+            <li>Node.js 22+</li>
+            <li>Codex CLI</li>
+            <li>ChatGPT-backed Codex Local Session</li>
+          </ul>
+        </article>
+        <article>
+          <h2>Local means local</h2>
+          <p>
+            Norvyn opens a token-gated loopback browser interface. Your Workspace is not sent to a hosted
+            Norvyn service, and the page contains no analytics or telemetry.
+          </p>
+        </article>
+        <article>
+          <h2>Project links</h2>
+          <p>
+            <a href="https://github.com/NickDabizaz/Norvyn-Agent">Source</a><br /><a
+              href="https://github.com/NickDabizaz/Norvyn-Agent/blob/master/docs/install.md"
+              >Installation help</a
+            ><br /><a href="https://github.com/NickDabizaz/Norvyn-Agent/blob/master/LICENSE">License</a
+            ><br /><a href="https://github.com/NickDabizaz/Norvyn-Agent/blob/master/CONTRIBUTING.md"
+              >Contributing</a
+            >
+          </p>
+        </article>
+      </section>
+      <footer>Norvyn is an open-source local application, not a hosted agent service.</footer>
+    </main>
+    <script>
+      document.querySelectorAll("[data-copy]").forEach((button) =>
+        button.addEventListener("click", async () => {
+          await navigator.clipboard.writeText(button.dataset.copy);
+          const original = button.textContent;
+          button.textContent = "Copied";
+          setTimeout(() => (button.textContent = original), 1400);
+        }),
+      );
+    </script>
+  </body>
+</html>

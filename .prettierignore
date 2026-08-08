@@ -1,0 +1,8 @@
+dist
+node_modules
+schemas
+.tmp
+package-lock.json
+skills-lock.json
+.agents
+.claude
