@@ -10,14 +10,16 @@ import {
   type ConnectionStatus,
   type DiagnosticsReport,
   type ProviderProcessStatus,
+  type ReasoningEffort,
   type ServerEvent,
   type ThreadCapabilities,
   type ThreadSummary,
   type UserSettings,
+  type TurnAttachment,
 } from "../protocol.js";
 import { clampPaneWidth, downloadText, storedNumber, storedSession } from "./app-shell.js";
 import { moveMenuFocus, useModalFocus } from "./accessibility.js";
-import { autosizeComposer, shouldSubmitComposer } from "./composer.js";
+import { autosizeComposer, maximumAttachments, readComposerFiles, shouldSubmitComposer } from "./composer.js";
 import { useBrowserConnection } from "./connection.js";
 import {
   appendAssistantDelta,
@@ -81,6 +83,8 @@ export function App() {
   const [workspaceBrowseAvailable, setWorkspaceBrowseAvailable] = useState(false);
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
   const [draft, setDraft] = useState("");
+  const [attachments, setAttachments] = useState<TurnAttachment[]>([]);
+  const [attachmentError, setAttachmentError] = useState<string>();
   const [pendingDraftRequest, setPendingDraftRequest] = useState<string>();
   const [revision, setRevision] = useState<{ previousTurnId?: string; label: string }>();
   const [search, setSearch] = useState("");
@@ -117,6 +121,8 @@ export function App() {
   const layout = useRef<HTMLElement>(null);
   const chatRef = useRef<ChatState | undefined>(undefined);
   const composerInput = useRef<HTMLTextAreaElement>(null);
+  const attachmentInput = useRef<HTMLInputElement>(null);
+  const pendingDraftRef = useRef<{ requestId: string; text: string } | undefined>(undefined);
   const workspaceTrigger = useRef<HTMLButtonElement>(null);
   const workspacePicker = useRef<HTMLElement>(null);
   const workspacePickerClose = useRef<HTMLButtonElement>(null);
@@ -215,8 +221,11 @@ export function App() {
         setOperationError(message);
         setWorkspaceBrowsing(false);
         if (message.scope === "workspace-history") setPendingWorkspaceDelete(undefined);
-        if (message.scope === "turn")
+        if (message.scope === "turn") {
+          setPendingDraftRequest(undefined);
+          pendingDraftRef.current = undefined;
           setTranscript((current) => failTurnTranscript(current, message.message));
+        }
         return;
       case "preflight/failed":
         setPreflightError(message);
@@ -271,25 +280,36 @@ export function App() {
           : undefined;
         selectChat(next);
         const previousTurnId = lastCompletedTurnId(transcript);
-        setTranscript((current) => [
-          ...current,
-          {
-            kind: "user",
-            id: `user-${message.turnId}`,
-            turnId: message.turnId,
-            previousTurnId,
-            text: message.text,
-            complete: true,
-          },
-          {
-            kind: "assistant",
-            id: `assistant-${message.turnId}`,
-            turnId: message.turnId,
-            previousTurnId,
-            text: "",
-            complete: false,
-          },
-        ]);
+        const pending = pendingDraftRef.current;
+        setTranscript((current) => {
+          if (pending)
+            return current.map((entry) =>
+              entry.id === `pending-user-${pending.requestId}` ||
+              entry.id === `pending-assistant-${pending.requestId}`
+                ? { ...entry, turnId: message.turnId, previousTurnId }
+                : entry,
+            );
+          return [
+            ...current,
+            {
+              kind: "user",
+              id: `user-${message.turnId}`,
+              turnId: message.turnId,
+              previousTurnId,
+              text: message.text,
+              complete: true,
+            },
+            {
+              kind: "assistant",
+              id: `assistant-${message.turnId}`,
+              turnId: message.turnId,
+              previousTurnId,
+              text: "",
+              complete: false,
+            },
+          ];
+        });
+        pendingDraftRef.current = undefined;
         return;
       }
       case "agent/message/delta":
@@ -327,7 +347,7 @@ export function App() {
         setApproval(message);
         return;
       case "approval/expired":
-        setApproval(undefined);
+        setApproval((current) => (current?.requestId === message.requestId ? undefined : current));
         return;
       case "provider/state":
         setProviderStatus(message.status);
@@ -420,18 +440,56 @@ export function App() {
   }
 
   function submitDraft() {
-    if (!chat || !draft.trim()) return;
+    if (!chat || !draft.trim() || pendingDraftRequest) return;
     const requestId = crypto.randomUUID();
+    const submittedText = draft;
     const sent = revision
       ? transmit({
           type: "chat/branch",
           chatId: chat.id,
           turnId: revision.previousTurnId,
-          text: draft,
+          text: submittedText,
           label: revision.label,
         })
-      : transmit({ type: "turn/start", chatId: chat.id, text: draft, requestId });
-    if (sent) setPendingDraftRequest(requestId);
+      : transmit({
+          type: "turn/start",
+          chatId: chat.id,
+          text: submittedText,
+          requestId,
+          attachments,
+        });
+    if (!sent) return;
+    setPendingDraftRequest(requestId);
+    pendingDraftRef.current = { requestId, text: submittedText };
+    discardDraft(localStorage, chat.id);
+    setDraft("");
+    setAttachments([]);
+    setAttachmentError(undefined);
+    setRevision(undefined);
+    const previousTurnId = lastCompletedTurnId(transcript);
+    setTranscript((current) => [
+      ...current,
+      {
+        kind: "user",
+        id: `pending-user-${requestId}`,
+        previousTurnId,
+        text: submittedText,
+        complete: true,
+      },
+      {
+        kind: "assistant",
+        id: `pending-assistant-${requestId}`,
+        previousTurnId,
+        text: "",
+        complete: false,
+      },
+    ]);
+  }
+
+  async function addAttachments(files: FileList | File[]): Promise<void> {
+    const result = await readComposerFiles(files, maximumAttachments - attachments.length);
+    setAttachments((current) => [...current, ...result.attachments].slice(0, maximumAttachments));
+    setAttachmentError(result.rejected[0]);
   }
 
   function changeDraft(value: string) {
@@ -461,6 +519,7 @@ export function App() {
     setArchivedHistory(archived);
     setThreads([]);
     setHistoryCursor(undefined);
+    setCollapsedWorkspaces(new Set());
   }
 
   function resize(event: React.PointerEvent) {
@@ -593,7 +652,10 @@ export function App() {
                 </button>
               </div>
             </header>
-            <button className="new-chat" onClick={() => transmit({ type: "chat/new" })}>
+            <button
+              className="new-chat"
+              onClick={() => transmit({ type: "chat/new", workspace: chat?.workspace })}
+            >
               ＋ New Chat
             </button>
             <div className="history-tabs">
@@ -720,6 +782,22 @@ export function App() {
                 value={chat?.model ?? ""}
                 options={modelOptions}
                 onChange={(model) => chat && transmit({ type: "chat/model", chatId: chat.id, model })}
+              />
+            </div>
+            <div className="selector">
+              <span>Effort</span>
+              <Dropdown
+                label="Reasoning effort"
+                value={chat?.effort ?? "medium"}
+                options={effortOptions}
+                onChange={(effort) =>
+                  chat &&
+                  transmit({
+                    type: "chat/effort",
+                    chatId: chat.id,
+                    effort: effort as ReasoningEffort,
+                  })
+                }
               />
             </div>
             <div className="selector">
@@ -928,17 +1006,31 @@ export function App() {
               <code>{approval.target}</code>
               <div>
                 <button
+                  type="button"
                   onClick={() => {
-                    transmit({ type: "approval/respond", requestId: approval.requestId, approved: false });
-                    setApproval(undefined);
+                    if (
+                      transmit({
+                        type: "approval/respond",
+                        requestId: approval.requestId,
+                        approved: false,
+                      })
+                    )
+                      setApproval(undefined);
                   }}
                 >
                   Decline
                 </button>
                 <button
+                  type="button"
                   onClick={() => {
-                    transmit({ type: "approval/respond", requestId: approval.requestId, approved: true });
-                    setApproval(undefined);
+                    if (
+                      transmit({
+                        type: "approval/respond",
+                        requestId: approval.requestId,
+                        approved: true,
+                      })
+                    )
+                      setApproval(undefined);
                   }}
                 >
                   Approve
@@ -1031,12 +1123,37 @@ export function App() {
               submitDraft();
             }}
           >
+            {attachments.length > 0 && (
+              <div className="composer-attachments" aria-label="Attached files">
+                {attachments.map((attachment, index) => (
+                  <span className="attachment-chip" key={`${attachment.name}-${index}`}>
+                    {attachment.kind === "image" ? (
+                      <img src={attachment.dataUrl} alt="" />
+                    ) : (
+                      <i aria-hidden="true">TXT</i>
+                    )}
+                    <strong>{attachment.name}</strong>
+                    <button
+                      type="button"
+                      aria-label={`Remove ${attachment.name}`}
+                      onClick={() => setAttachments((current) => current.filter((_, item) => item !== index))}
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
             <textarea
               ref={composerInput}
               rows={1}
               aria-label="Start a Turn"
               value={draft}
               onChange={(event) => changeDraft(event.target.value)}
+              onPaste={(event) => {
+                const files = [...event.clipboardData.files];
+                if (files.length) void addAttachments(files);
+              }}
               onKeyDown={(event) => {
                 if (!shouldSubmitComposer(event.key, event.shiftKey, event.nativeEvent.isComposing)) return;
                 event.preventDefault();
@@ -1047,37 +1164,55 @@ export function App() {
               }
               disabled={!chat?.workspace || !chat.model || connection !== "connected"}
             />
-            {draft && (
-              <button
-                type="button"
-                className="discard"
-                aria-label="Discard draft"
-                onClick={() => {
-                  if (chat) discardDraft(localStorage, chat.id);
-                  setDraft("");
+            <div className="composer-actions">
+              <input
+                ref={attachmentInput}
+                type="file"
+                multiple
+                accept="image/*,text/*,.csv,.json,.md,.toml,.xml,.yaml,.yml"
+                aria-label="Attach images or files"
+                onChange={(event) => {
+                  if (event.target.files) void addAttachments(event.target.files);
+                  event.target.value = "";
                 }}
-              >
-                Discard
-              </button>
-            )}
-            {chat?.turnId ? (
+              />
               <button
                 type="button"
-                className="stop"
-                onClick={() => transmit({ type: "turn/interrupt", chatId: chat.id })}
+                className="attach"
+                aria-label="Attach images or files"
+                title={`Attach up to ${maximumAttachments} images or text files`}
+                disabled={attachments.length >= maximumAttachments}
+                onClick={() => attachmentInput.current?.click()}
               >
-                Stop
+                +
               </button>
-            ) : (
-              <button
-                type="submit"
-                aria-label="Send Turn"
-                title="Send (Enter)"
-                disabled={!draft.trim() || !chat?.workspace || !chat.model || connection !== "connected"}
-              >
-                <span aria-hidden="true">↑</span>
-              </button>
-            )}
+              <span className="attachment-count">{attachments.length || ""}</span>
+              {attachmentError && <span className="attachment-error">{attachmentError}</span>}
+              {chat?.turnId ? (
+                <button
+                  type="button"
+                  className="stop"
+                  onClick={() => transmit({ type: "turn/interrupt", chatId: chat.id })}
+                >
+                  Stop
+                </button>
+              ) : (
+                <button
+                  type="submit"
+                  aria-label="Send Turn"
+                  title="Send (Enter)"
+                  disabled={
+                    !draft.trim() ||
+                    Boolean(pendingDraftRequest) ||
+                    !chat?.workspace ||
+                    !chat.model ||
+                    connection !== "connected"
+                  }
+                >
+                  <span aria-hidden="true">↑</span>
+                </button>
+              )}
+            </div>
           </form>
         </div>
       </section>
@@ -1150,7 +1285,16 @@ function WorkspaceGroup({
           <strong>{workspaceName(group.workspace)}</strong>
           <small>{group.threads.length}</small>
         </button>
-        <details className="workspace-actions">
+        <details
+          className="workspace-actions"
+          onToggle={(event) => {
+            if (event.currentTarget.open) {
+              event.currentTarget
+                .querySelector(".workspace-actions-menu")
+                ?.scrollIntoView({ block: "nearest", inline: "nearest" });
+            }
+          }}
+        >
           <summary aria-label={`Workspace actions for ${workspaceName(group.workspace)}`}>•••</summary>
           <div className="workspace-actions-menu">
             {!archived && (
@@ -1368,6 +1512,18 @@ function UtilityPanel({
           >
             <StatusControls providerStatus={providerStatus} transmit={transmit} />
             <label>
+              Provider
+              <select
+                value={form.provider}
+                onChange={(event) =>
+                  setForm({ ...form, provider: event.target.value as UserSettings["provider"] })
+                }
+              >
+                <option value="openai">OpenAI · ChatGPT via Codex</option>
+                <option value="anthropic">Anthropic · Claude via Claude Code</option>
+              </select>
+            </label>
+            <label>
               Default model
               <select
                 value={form.defaultModel ?? models[0] ?? ""}
@@ -1395,14 +1551,25 @@ function UtilityPanel({
                 }
               />
             </label>
-            <label>
-              Codex CLI location
-              <input
-                value={form.codexPath ?? ""}
-                placeholder="codex"
-                onChange={(event) => setForm({ ...form, codexPath: event.target.value || undefined })}
-              />
-            </label>
+            {form.provider === "openai" ? (
+              <label>
+                Codex CLI location
+                <input
+                  value={form.codexPath ?? ""}
+                  placeholder="codex"
+                  onChange={(event) => setForm({ ...form, codexPath: event.target.value || undefined })}
+                />
+              </label>
+            ) : (
+              <label>
+                Claude Code location
+                <input
+                  value={form.claudePath ?? ""}
+                  placeholder="claude"
+                  onChange={(event) => setForm({ ...form, claudePath: event.target.value || undefined })}
+                />
+              </label>
+            )}
             <label className="check">
               <input
                 type="checkbox"
@@ -1452,9 +1619,9 @@ function UtilityPanel({
               <dl>
                 <dt>Norvyn</dt>
                 <dd>{diagnostics.norvynVersion}</dd>
-                <dt>Codex CLI</dt>
+                <dt>{diagnostics.provider === "openai" ? "Codex CLI" : "Claude Code"}</dt>
                 <dd>
-                  {diagnostics.codexPath} · {diagnostics.codexVersion ?? "unavailable"}
+                  {diagnostics.providerPath} · {diagnostics.providerVersion ?? "unavailable"}
                 </dd>
                 <dt>Local Session</dt>
                 <dd>{diagnostics.localSession}</dd>
@@ -1523,6 +1690,14 @@ const accessModeOptions: DropdownOption[] = [
   { value: "manual", label: "Manual", detail: "Ask before actions", tone: "manual" },
   { value: "auto-edit", label: "Auto Edit", detail: "Edit files automatically", tone: "edit" },
   { value: "auto", label: "Auto", detail: "No approval prompts", tone: "auto" },
+];
+
+const effortOptions: DropdownOption[] = [
+  { value: "minimal", label: "Minimal", detail: "Fastest responses", tone: "manual" },
+  { value: "low", label: "Low", detail: "Quick reasoning", tone: "manual" },
+  { value: "medium", label: "Medium", detail: "Balanced", tone: "edit" },
+  { value: "high", label: "High", detail: "Deeper reasoning", tone: "auto" },
+  { value: "xhigh", label: "Extra high", detail: "Most deliberate", tone: "sol" },
 ];
 
 function Dropdown({

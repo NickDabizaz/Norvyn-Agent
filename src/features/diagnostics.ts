@@ -1,11 +1,15 @@
-import type { DiagnosticsReport, ProviderProcessStatus } from "../protocol.js";
+import type { DiagnosticsReport, ProviderKind, ProviderProcessStatus } from "../protocol.js";
+
+const providerLabel: Record<ProviderKind, string> = { openai: "Codex CLI", anthropic: "Claude Code" };
+const connectLabel: Record<ProviderKind, string> = { openai: "Codex", anthropic: "Claude" };
 
 const sensitiveKey = /(token|secret|password|credential|api[-_]?key|authorization|cookie)/i;
 
 export function createDiagnostics(input: {
   norvynVersion: string;
-  codexPath: string;
-  codexVersion?: string;
+  provider: ProviderKind;
+  providerPath: string;
+  providerVersion?: string;
   localSession: DiagnosticsReport["localSession"];
   providerProcess: ProviderProcessStatus;
   connection: DiagnosticsReport["connection"];
@@ -31,9 +35,9 @@ export function sanitize(value: unknown): unknown {
 }
 
 function nextAction(input: Omit<DiagnosticsReport, "generatedAt" | "nextAction">): string | undefined {
-  if (input.providerProcess === "missing") return "Install Codex CLI, then reconnect.";
+  if (input.providerProcess === "missing") return `Install ${providerLabel[input.provider]}, then reconnect.`;
   if (input.localSession === "missing" || input.localSession === "expired")
-    return "Connect With Codex again.";
+    return `Connect With ${connectLabel[input.provider]} again.`;
   if (input.providerProcess === "failed") return "Restart the Provider and inspect the new result.";
   if (input.connection === "disconnected") return "Reconnect the Provider.";
   return undefined;

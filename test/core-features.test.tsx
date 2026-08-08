@@ -68,6 +68,7 @@ test("User Settings persist only the approved local preference fields", async ()
   const persisted = JSON.parse(await readFile(path, "utf8"));
   expect(Object.keys(persisted).sort()).toEqual([
     "customModels",
+    "provider",
     "textScale",
     "transcriptDensity",
     "version",
@@ -127,6 +128,18 @@ test("unsupported browser protocol variants fail explicitly", () => {
   expect(() =>
     parseBrowserCommand({ type: "chat/access-mode", chatId: "one", accessMode: "unsafe" }),
   ).toThrow("Invalid accessMode");
+  expect(() =>
+    parseBrowserCommand({
+      type: "turn/start",
+      text: "hello",
+      attachments: Array.from({ length: 11 }, (_, index) => ({
+        kind: "text",
+        name: `${index}.txt`,
+        mimeType: "text/plain",
+        text: "x",
+      })),
+    }),
+  ).toThrow("at most 10");
 });
 
 test("nested Browser and Provider boundary payloads are decoded before feature logic", () => {
@@ -181,7 +194,8 @@ test("nested Browser and Provider boundary payloads are decoded before feature l
 test("diagnostic export removes credentials recursively and gives unhealthy states a next action", () => {
   const report = createDiagnostics({
     norvynVersion: "1.0.0",
-    codexPath: "codex",
+    provider: "openai",
+    providerPath: "codex",
     localSession: "expired",
     providerProcess: "failed",
     connection: "disconnected",

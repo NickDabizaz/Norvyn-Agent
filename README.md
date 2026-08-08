@@ -1,14 +1,16 @@
 # Norvyn
 
 Norvyn is a local-first personal AI assistant for Windows. It opens a browser interface on your machine and
-reuses a ChatGPT-backed Codex Local Session; it does not upload your Workspace to a hosted Norvyn service.
+reuses a Local Session you have already authenticated — a ChatGPT-backed Codex one, or a Claude one; it does
+not upload your Workspace to a hosted Norvyn service.
 
 ## Install
 
-Requirements: Windows, Node.js 22 or newer, and the Codex CLI.
+Requirements: Windows, Node.js 22 or newer, and the CLI of the Provider you want to use.
 
 ```powershell
-npm install -g @openai/codex@latest
+npm install -g @openai/codex@latest          # OpenAI, via ChatGPT (the default Provider)
+npm install -g @anthropic-ai/claude-code@latest   # or Anthropic, via Claude
 npm install -g norvyn
 norvyn
 ```

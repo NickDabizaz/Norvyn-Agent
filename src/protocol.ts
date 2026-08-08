@@ -3,6 +3,10 @@ import type { ThreadItem } from "../schemas/v2/ThreadItem.js";
 import type { Turn } from "../schemas/v2/Turn.js";
 
 export type AccessMode = "manual" | "auto-edit" | "auto";
+export type ReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh";
+export type TurnAttachment =
+  | { kind: "image"; name: string; mimeType: string; dataUrl: string }
+  | { kind: "text"; name: string; mimeType: string; text: string };
 export type ConnectionStatus = "connecting" | "connected" | "disconnected";
 export type ProviderProcessStatus =
   "missing" | "signed-out" | "connecting" | "connected" | "disconnected" | "failed";
@@ -26,6 +30,7 @@ export interface ChatState {
   threadId?: string;
   workspace?: string;
   model?: string;
+  effort: ReasoningEffort;
   modelNotice?: string;
   accessMode: AccessMode;
   turnId?: string;
@@ -52,11 +57,16 @@ export interface ThreadSummary {
   archived: boolean;
 }
 
+/** Which Provider Norvyn reaches models through. The user-facing labels are ChatGPT and Claude. */
+export type ProviderKind = "openai" | "anthropic";
+
 export interface UserSettings {
   version: 1;
+  provider: ProviderKind;
   defaultModel?: string;
   customModels: string[];
   codexPath?: string;
+  claudePath?: string;
   versionChecks: boolean;
   textScale: TextScale;
   transcriptDensity: TranscriptDensity;
@@ -64,8 +74,9 @@ export interface UserSettings {
 
 export interface DiagnosticsReport {
   norvynVersion: string;
-  codexPath: string;
-  codexVersion?: string;
+  provider: ProviderKind;
+  providerPath: string;
+  providerVersion?: string;
   localSession: "available" | "missing" | "expired" | "unknown";
   providerProcess: ProviderProcessStatus;
   connection: ConnectionStatus;
@@ -80,6 +91,7 @@ export type BrowserCommand =
   | { type: "chat/workspace"; chatId: string; workspace: string }
   | { type: "chat/workspace/browse"; chatId: string }
   | { type: "chat/model"; chatId: string; model: string }
+  | { type: "chat/effort"; chatId: string; effort: ReasoningEffort }
   | { type: "chat/access-mode"; chatId: string; accessMode: AccessMode }
   | { type: "chat/branch"; chatId: string; turnId?: string; text?: string; label: string }
   | { type: "thread/rename"; threadId: string; name: string }
@@ -89,7 +101,13 @@ export type BrowserCommand =
   | { type: "thread/delete"; threadId: string; confirmed: true }
   | { type: "history/workspace/archive"; workspace: string }
   | { type: "history/workspace/delete"; workspace: string; confirmed?: true }
-  | { type: "turn/start"; chatId?: string; text: string; requestId?: string }
+  | {
+      type: "turn/start";
+      chatId?: string;
+      text: string;
+      requestId?: string;
+      attachments?: TurnAttachment[];
+    }
   | { type: "turn/interrupt"; chatId: string }
   | { type: "approval/respond"; requestId: number | string; approved: boolean }
   | { type: "auth/connect" }
@@ -251,6 +269,12 @@ export function parseBrowserCommand(input: unknown): BrowserCommand {
         chatId: stringValue(value.chatId, "chatId"),
         model: stringValue(value.model, "model"),
       };
+    case "chat/effort":
+      return {
+        type,
+        chatId: stringValue(value.chatId, "chatId"),
+        effort: enumValue(value.effort, "effort", ["minimal", "low", "medium", "high", "xhigh"]),
+      };
     case "chat/access-mode":
       return {
         type,
@@ -300,6 +324,7 @@ export function parseBrowserCommand(input: unknown): BrowserCommand {
         chatId: optionalString(value.chatId, "chatId"),
         text: stringValue(value.text, "text"),
         requestId: optionalString(value.requestId, "requestId"),
+        attachments: optionalAttachments(value.attachments),
       };
     case "approval/respond":
       return {
@@ -580,6 +605,7 @@ function userSettingsValue(input: unknown): UserSettings {
   if (value.version !== 1) invalidField("settings.version", "must be 1");
   const result: UserSettings = {
     version: 1,
+    provider: enumValue(value.provider ?? "openai", "settings.provider", ["openai", "anthropic"]),
     customModels: stringArray(value.customModels, "settings.customModels"),
     versionChecks: booleanValue(value.versionChecks, "settings.versionChecks"),
     textScale: enumValue(value.textScale, "settings.textScale", ["small", "medium", "large"]),
@@ -590,8 +616,10 @@ function userSettingsValue(input: unknown): UserSettings {
   };
   const defaultModel = optionalString(value.defaultModel, "settings.defaultModel");
   const codexPath = optionalString(value.codexPath, "settings.codexPath");
+  const claudePath = optionalString(value.claudePath, "settings.claudePath");
   if (defaultModel !== undefined) result.defaultModel = defaultModel;
   if (codexPath !== undefined) result.codexPath = codexPath;
+  if (claudePath !== undefined) result.claudePath = claudePath;
   return result;
 }
 
@@ -602,6 +630,7 @@ function chatValue(input: unknown): void {
   optionalString(value.workspace, "chat.workspace");
   optionalString(value.model, "chat.model");
   optionalString(value.modelNotice, "chat.modelNotice");
+  enumValue(value.effort, "chat.effort", ["minimal", "low", "medium", "high", "xhigh"]);
   enumValue(value.accessMode, "chat.accessMode", ["manual", "auto-edit", "auto"]);
   optionalString(value.turnId, "chat.turnId");
   if (value.origin !== undefined) {
@@ -610,6 +639,25 @@ function chatValue(input: unknown): void {
     optionalString(origin.turnId, "chat.origin.turnId");
     stringValue(origin.label, "chat.origin.label");
   }
+}
+
+function optionalAttachments(value: unknown): TurnAttachment[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  const attachments = arrayValue(value, "attachments");
+  if (attachments.length > 10) invalidField("attachments", "must contain at most 10 files");
+  return attachments.map((entry, index) => {
+    const attachment = objectValue(entry, `attachments[${index}]`);
+    const kind = enumValue(attachment.kind, `attachments[${index}].kind`, ["image", "text"]);
+    const name = stringValue(attachment.name, `attachments[${index}].name`);
+    const mimeType = stringValue(attachment.mimeType, `attachments[${index}].mimeType`);
+    if (kind === "image") {
+      const dataUrl = stringValue(attachment.dataUrl, `attachments[${index}].dataUrl`);
+      if (!dataUrl.startsWith(`data:${mimeType};base64,`))
+        invalidField(`attachments[${index}].dataUrl`, "must match the declared image type");
+      return { kind, name, mimeType, dataUrl };
+    }
+    return { kind, name, mimeType, text: textValue(attachment.text, `attachments[${index}].text`) };
+  });
 }
 
 function capabilitiesValue(input: unknown): void {
@@ -692,8 +740,9 @@ function threadItemValue(input: unknown, field: string): void {
 function diagnosticsValue(input: unknown): void {
   const value = objectValue(input, "report");
   stringValue(value.norvynVersion, "report.norvynVersion");
-  stringValue(value.codexPath, "report.codexPath");
-  optionalString(value.codexVersion, "report.codexVersion");
+  enumValue(value.provider, "report.provider", ["openai", "anthropic"]);
+  stringValue(value.providerPath, "report.providerPath");
+  optionalString(value.providerVersion, "report.providerVersion");
   enumValue(value.localSession, "report.localSession", ["available", "missing", "expired", "unknown"]);
   enumValue(value.providerProcess, "report.providerProcess", [
     "missing",

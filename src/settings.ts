@@ -5,6 +5,7 @@ import type { UserSettings } from "./protocol.js";
 
 export const DEFAULT_SETTINGS: UserSettings = {
   version: 1,
+  provider: "openai",
   customModels: [],
   versionChecks: false,
   textScale: "medium",
@@ -62,6 +63,10 @@ export function normalizeSettings(value: Record<string, unknown>): UserSettings 
   const customModels = stringList(value.customModels ?? []);
   const defaultModel = optionalString(value.defaultModel, "defaultModel");
   const codexPath = optionalString(value.codexPath, "codexPath");
+  const claudePath = optionalString(value.claudePath, "claudePath");
+  const provider = value.provider ?? DEFAULT_SETTINGS.provider;
+  if (!isOneOf(provider, ["openai", "anthropic"] as const))
+    throw new Error("provider must be openai or anthropic");
   const versionChecks = value.versionChecks ?? DEFAULT_SETTINGS.versionChecks;
   if (typeof versionChecks !== "boolean") throw new Error("versionChecks must be true or false");
   const textScale = value.textScale ?? DEFAULT_SETTINGS.textScale;
@@ -70,7 +75,17 @@ export function normalizeSettings(value: Record<string, unknown>): UserSettings 
   const transcriptDensity = value.transcriptDensity ?? DEFAULT_SETTINGS.transcriptDensity;
   if (!isOneOf(transcriptDensity, ["comfortable", "compact"] as const))
     throw new Error("transcriptDensity must be comfortable or compact");
-  return { version: 1, customModels, defaultModel, codexPath, versionChecks, textScale, transcriptDensity };
+  return {
+    version: 1,
+    provider,
+    customModels,
+    defaultModel,
+    codexPath,
+    claudePath,
+    versionChecks,
+    textScale,
+    transcriptDensity,
+  };
 }
 
 export interface ProviderModelCatalog {
@@ -90,7 +105,7 @@ export function providerModelCatalog(
   const error = supported.length
     ? undefined
     : (discoveryError ??
-      "The Provider advertised no supported models. Reconnect the Provider or repair the Codex Local Session.");
+      "The Provider advertised no supported models. Reconnect the Provider or repair its Local Session.");
   const defaultModel =
     settings.defaultModel && supported.includes(settings.defaultModel) ? settings.defaultModel : supported[0];
   return { models: supported, unverifiedModels, defaultModel, error };
@@ -100,9 +115,11 @@ function migrateLegacySettings(value: Record<string, unknown>): UserSettings {
   const legacyModels = stringList(value.models ?? []);
   return normalizeSettings({
     version: 1,
+    provider: value.provider,
     customModels: legacyModels,
     defaultModel: value.defaultModel,
     codexPath: value.codexPath,
+    claudePath: value.claudePath,
     versionChecks: value.versionChecks,
     textScale: value.textScale,
     transcriptDensity: value.transcriptDensity,

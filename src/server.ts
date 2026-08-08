@@ -24,6 +24,8 @@ import {
   type RegistryFetcher,
 } from "./features/update.js";
 import { checkPreflight, loginWithCodex, validateCodexPath, type Preflight } from "./preflight.js";
+import { checkClaudePreflight, loginWithClaude, validateClaudePath } from "./claude-preflight.js";
+import { ClaudeAdapter } from "./claude-transport.js";
 import {
   assertNever,
   parseBrowserCommand,
@@ -32,9 +34,11 @@ import {
   type DiagnosticsReport,
   type OperationScope,
   ProtocolDecodeError,
+  type ProviderKind,
   type ProviderProcessStatus,
   type ServerEvent,
   type ThreadCapabilities,
+  type UserSettings,
 } from "./protocol.js";
 import {
   loadUserSettings,
@@ -58,9 +62,9 @@ export interface NorvynServer {
 type ProviderAdapter = Transport & ThreadStore & ModelSource;
 
 export interface NorvynDependencies {
-  connectProvider(codexPath?: string): Promise<ProviderAdapter>;
-  preflight(codexPath?: string): Promise<Preflight>;
-  login(codexPath?: string): Promise<void>;
+  connectProvider(settings: UserSettings): Promise<ProviderAdapter>;
+  preflight(settings: UserSettings): Promise<Preflight>;
+  login(settings: UserSettings): Promise<void>;
   installer: Installer;
   registryFetcher?: RegistryFetcher;
   workspacePicker: WorkspacePicker;
@@ -93,9 +97,18 @@ export async function startNorvyn(
   overrides: Partial<NorvynDependencies> = {},
 ): Promise<NorvynServer> {
   const dependencies: NorvynDependencies = {
-    connectProvider: (codexPath) => CodexAdapter.connect(codexPath),
-    preflight: checkPreflight,
-    login: loginWithCodex,
+    connectProvider: (settings) =>
+      settings.provider === "anthropic"
+        ? ClaudeAdapter.connect({ claudePath: settings.claudePath })
+        : CodexAdapter.connect(settings.codexPath),
+    preflight: (settings) =>
+      settings.provider === "anthropic"
+        ? checkClaudePreflight(settings.claudePath)
+        : checkPreflight(settings.codexPath),
+    login: (settings) =>
+      settings.provider === "anthropic"
+        ? loginWithClaude(settings.claudePath)
+        : loginWithCodex(settings.codexPath),
     installer: new NpmInstaller(),
     workspacePicker: new PlatformWorkspacePicker(),
     sessionToken: () => randomBytes(32).toString("hex"),
@@ -105,7 +118,7 @@ export async function startNorvyn(
     ...overrides,
   };
   const settingsResult = await loadUserSettings();
-  const preflight = await dependencies.preflight(settingsResult.settings.codexPath);
+  const preflight = await dependencies.preflight(settingsResult.settings);
   const runtime: Runtime = {
     preflight,
     providerStatus: preflight.ok
@@ -120,7 +133,7 @@ export async function startNorvyn(
   };
   if (preflight.ok) {
     try {
-      runtime.adapter = await dependencies.connectProvider(settingsResult.settings.codexPath);
+      runtime.adapter = await dependencies.connectProvider(settingsResult.settings);
       runtime.providerStatus = "connected";
       await discoverModels(runtime, runtime.adapter);
     } catch {
@@ -404,6 +417,9 @@ async function startRuntime(
       case "chat/model":
         setModel(message.chatId, message.model);
         return;
+      case "chat/effort":
+        setEffort(message.chatId, message.effort);
+        return;
       case "chat/access-mode":
         setAccessMode(message.chatId, message.accessMode);
         return;
@@ -431,7 +447,12 @@ async function startRuntime(
         await threadAction(message.threadId, "deleted", () => adapter.deleteThread(message.threadId));
         return;
       case "turn/start":
-        await startTurn(message.chatId ?? initialChat.id, message.text, message.requestId);
+        await startTurn(
+          message.chatId ?? initialChat.id,
+          message.text,
+          message.requestId,
+          message.attachments,
+        );
         return;
       case "turn/interrupt":
         await interruptTurn(message.chatId);
@@ -448,9 +469,12 @@ async function startRuntime(
     connection: WebSocket,
     requested: typeof runtime.settingsResult.settings,
   ): Promise<void> {
+    const current = runtime.settingsResult.settings;
     try {
-      if (requested.codexPath && requested.codexPath !== runtime.settingsResult.settings.codexPath)
+      if (requested.codexPath && requested.codexPath !== current.codexPath)
         await validateCodexPath(requested.codexPath);
+      if (requested.claudePath && requested.claudePath !== current.claudePath)
+        await validateClaudePath(requested.claudePath);
       if (
         runtime.adapter &&
         requested.defaultModel &&
@@ -462,6 +486,7 @@ async function startRuntime(
         );
       }
       const settings = await saveUserSettings(requested);
+      const providerChanged = settings.provider !== current.provider;
       runtime.settingsResult = { settings, migrated: false };
       catalog = providerModelCatalog(runtime.availableModels, settings, runtime.modelDiscoveryError);
       send(connection, {
@@ -472,23 +497,26 @@ async function startRuntime(
         modelError: catalog.error,
       });
       broadcast(settingsEvent());
+      // Switching Provider replaces the Transport, its History, and its models, so it is a reconnect.
+      if (providerChanged) await reconnectProvider();
     } catch (error) {
       send(connection, { type: "settings/error", message: browserErrorMessage(error) });
     }
   }
 
   async function connectAuthentication(): Promise<void> {
+    const provider = providerName(runtime.settingsResult.settings.provider);
     if (runtime.preflight.kind !== "signed-out" && runtime.preflight.kind !== "expired")
-      throw new Error("Codex authentication is not currently required.");
+      throw new Error(`${provider} authentication is not currently required.`);
     broadcast({
       type: "auth/state",
       status: "connecting",
-      message: "Codex opened its Provider-owned sign-in flow.",
+      message: `${provider} opened its Provider-owned sign-in flow.`,
     });
     try {
-      await dependencies.login(runtime.settingsResult.settings.codexPath);
+      await dependencies.login(runtime.settingsResult.settings);
       await reconnectProvider();
-      if (!runtime.adapter) throw new Error("Codex sign-in did not create a usable Local Session.");
+      if (!runtime.adapter) throw new Error(`${provider} sign-in did not create a usable Local Session.`);
       broadcast({ type: "auth/state", status: "connected" });
     } catch (error) {
       const message = browserErrorMessage(error);
@@ -497,7 +525,11 @@ async function startRuntime(
         : /cancel/i.test(message)
           ? "cancelled"
           : "failed";
-      broadcast({ type: "auth/state", status, message: `${message} Select Connect With Codex to retry.` });
+      broadcast({
+        type: "auth/state",
+        status,
+        message: `${message} Select Connect With ${provider} to retry.`,
+      });
     }
   }
 
@@ -506,7 +538,7 @@ async function startRuntime(
     runtime.providerStatus = "connecting";
     connectionStatus = "connecting";
     broadcast({ type: "provider/state", status: "connecting" });
-    runtime.preflight = await dependencies.preflight(runtime.settingsResult.settings.codexPath);
+    runtime.preflight = await dependencies.preflight(runtime.settingsResult.settings);
     if (!runtime.preflight.ok) {
       runtime.providerStatus =
         runtime.preflight.kind === "missing"
@@ -527,7 +559,7 @@ async function startRuntime(
       return;
     }
     try {
-      const adapter = await dependencies.connectProvider(runtime.settingsResult.settings.codexPath);
+      const adapter = await dependencies.connectProvider(runtime.settingsResult.settings);
       runtime.adapter = adapter;
       runtime.providerStatus = "connected";
       connectionStatus = "connected";
@@ -537,6 +569,7 @@ async function startRuntime(
         runtime.settingsResult.settings,
         runtime.modelDiscoveryError,
       );
+      reconcileDraftModels();
       attachAdapter(adapter);
       broadcast({
         type: "provider/state",
@@ -582,6 +615,7 @@ async function startRuntime(
         runtime.settingsResult.settings,
         runtime.modelDiscoveryError,
       );
+      reconcileDraftModels();
       broadcast({ type: "provider/state", status: "connected", message: "Provider restarted successfully." });
       broadcastConnection();
     } catch (error) {
@@ -688,6 +722,7 @@ async function startRuntime(
       threadId: resumed.thread.id,
       workspace: String(resumed.thread.cwd),
       model: modelAvailable ? resumedModel : undefined,
+      effort: normalizeReasoningEffort(resumed.reasoningEffort),
       modelNotice:
         resumedModel && !modelAvailable
           ? `This Chat used ${resumedModel}, which the active Provider no longer advertises. Choose a verified model to continue.`
@@ -742,6 +777,12 @@ async function startRuntime(
     broadcast({ type: "chat/updated", chat: publicChat(chat) });
   }
 
+  function setEffort(chatId: string, effort: ChatState["effort"]): void {
+    const chat = requiredChat(chatId);
+    chat.effort = effort;
+    broadcast({ type: "chat/updated", chat: publicChat(chat) });
+  }
+
   async function branchChat(message: Extract<BrowserCommand, { type: "chat/branch" }>): Promise<void> {
     const source = requiredChat(message.chatId);
     if (source.turnId) throw new Error("Stop the active Turn or wait for it to finish before branching.");
@@ -763,6 +804,7 @@ async function startRuntime(
       threadId,
       workspace: source.workspace,
       model: source.model,
+      effort: source.effort,
       accessMode: "manual",
       origin: { threadId: source.threadId, turnId: message.turnId, label: message.label },
       turns,
@@ -802,7 +844,12 @@ async function startRuntime(
     scheduleHistoryRefresh();
   }
 
-  async function startTurn(chatId: string, text: string, requestId?: string): Promise<void> {
+  async function startTurn(
+    chatId: string,
+    text: string,
+    requestId?: string,
+    attachments?: Extract<BrowserCommand, { type: "turn/start" }>["attachments"],
+  ): Promise<void> {
     const adapter = requireAdapter();
     const chat = requiredChat(chatId);
     if (!text.trim()) return;
@@ -819,7 +866,7 @@ async function startRuntime(
     startingTurns += 1;
     try {
       try {
-        chat.turnId = await adapter.startTurn(chat.threadId, text, chat.model);
+        chat.turnId = await adapter.startTurn(chat.threadId, text, chat.model, chat.effort, attachments);
       } catch (error) {
         if (catalog.unverifiedModels.includes(chat.model) && error instanceof ProviderBoundaryError)
           throw new Error(
@@ -933,7 +980,6 @@ async function startRuntime(
         type: "turn/completed",
         chatId: chat?.id,
         threadId,
-        turn: params?.turn as Turn | undefined,
       });
     } else if (message.method === "error") {
       const error = (params?.error ?? {}) as TurnError;
@@ -1014,8 +1060,9 @@ async function startRuntime(
             : "unknown";
     return createDiagnostics({
       norvynVersion: NORVYN_VERSION,
-      codexPath: runtime.preflight.codexPath,
-      codexVersion: runtime.preflight.version,
+      provider: runtime.settingsResult.settings.provider,
+      providerPath: runtime.preflight.providerPath,
+      providerVersion: runtime.preflight.version,
       localSession,
       providerProcess: runtime.providerStatus,
       connection: connectionStatus,
@@ -1024,6 +1071,17 @@ async function startRuntime(
 
   function newChat(chatWorkspace?: string): ChatRecord {
     return chats.create(chatWorkspace, catalog.defaultModel);
+  }
+
+  function reconcileDraftModels(): void {
+    for (const chat of chats.values()) {
+      if (chat.threadId) continue;
+      const available =
+        chat.model && (catalog.models.includes(chat.model) || catalog.unverifiedModels.includes(chat.model));
+      if (available) continue;
+      chat.model = catalog.defaultModel;
+      chat.modelNotice = undefined;
+    }
   }
 
   function publicChat(chat: ChatRecord): ChatState {
@@ -1079,11 +1137,17 @@ async function discoverModels(runtime: Runtime, adapter: ProviderAdapter): Promi
   }
 }
 
+/** The user-facing name of a Provider's own tooling, as it appears in sign-in prompts. */
+function providerName(provider: ProviderKind): string {
+  return provider === "anthropic" ? "Claude" : "Codex";
+}
+
 export function commandScope(command: BrowserCommand): OperationScope {
   switch (command.type) {
     case "turn/start":
     case "turn/interrupt":
     case "approval/respond":
+    case "chat/effort":
       return "turn";
     case "chat/workspace":
     case "chat/workspace/browse":
@@ -1121,6 +1185,10 @@ export function commandScope(command: BrowserCommand): OperationScope {
     default:
       return assertNever(command);
   }
+}
+
+function normalizeReasoningEffort(value: string | null | undefined): ChatState["effort"] {
+  return value === "minimal" || value === "low" || value === "high" || value === "xhigh" ? value : "medium";
 }
 
 function isToolItem(item: ThreadItem): boolean {
