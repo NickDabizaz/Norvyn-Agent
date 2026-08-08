@@ -42,7 +42,13 @@ import {
   saveUserSettings,
   type SettingsLoadResult,
 } from "./settings.js";
-import { CodexAdapter, type ModelSource, type ThreadStore, type Transport } from "./transport.js";
+import {
+  CodexAdapter,
+  ProviderBoundaryError,
+  type ModelSource,
+  type ThreadStore,
+  type Transport,
+} from "./transport.js";
 import { NORVYN_VERSION } from "./version.js";
 
 export interface NorvynServer {
@@ -106,7 +112,7 @@ export async function startNorvyn(
       ? "connecting"
       : preflight.kind === "missing"
         ? "missing"
-        : preflight.kind === "signed-out"
+        : preflight.kind === "signed-out" || preflight.kind === "expired"
           ? "signed-out"
           : "failed",
     availableModels: [],
@@ -167,6 +173,19 @@ async function startRuntime(
       return;
     }
     if (request.method === "POST" && requestUrl.pathname === "/session") {
+      const expectedOrigin = loopbackOrigin(server);
+      if (!expectedOrigin || request.headers.origin !== expectedOrigin) {
+        response
+          .writeHead(403, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" })
+          .end(
+            JSON.stringify({
+              scope: "authorization",
+              code: "authorization.origin-rejected",
+              message: "Browser authorization must originate from this Norvyn instance.",
+            }),
+          );
+        return;
+      }
       const payload = (await readJsonBody(request).catch(() => undefined)) as
         { access?: unknown } | undefined;
       if (
@@ -254,7 +273,7 @@ async function startRuntime(
     send(connection, { type: "diagnostics/state", report: diagnostics() });
     const currentPreflight = runtime.preflight;
     if (currentPreflight.ok && runtime.adapter) void sendHistory(connection, { type: "history/list" });
-    else if (currentPreflight.kind === "signed-out")
+    else if (currentPreflight.kind === "signed-out" || currentPreflight.kind === "expired")
       send(connection, { type: "auth/state", status: "required" });
     else if (!currentPreflight.ok)
       send(connection, {
@@ -459,7 +478,7 @@ async function startRuntime(
   }
 
   async function connectAuthentication(): Promise<void> {
-    if (runtime.preflight.kind !== "signed-out")
+    if (runtime.preflight.kind !== "signed-out" && runtime.preflight.kind !== "expired")
       throw new Error("Codex authentication is not currently required.");
     broadcast({
       type: "auth/state",
@@ -492,12 +511,13 @@ async function startRuntime(
       runtime.providerStatus =
         runtime.preflight.kind === "missing"
           ? "missing"
-          : runtime.preflight.kind === "signed-out"
+          : runtime.preflight.kind === "signed-out" || runtime.preflight.kind === "expired"
             ? "signed-out"
             : "failed";
       connectionStatus = "disconnected";
       broadcastConnection();
-      if (runtime.preflight.kind === "signed-out") broadcast({ type: "auth/state", status: "required" });
+      if (runtime.preflight.kind === "signed-out" || runtime.preflight.kind === "expired")
+        broadcast({ type: "auth/state", status: "required" });
       else
         broadcast({
           type: "preflight/failed",
@@ -535,6 +555,7 @@ async function startRuntime(
   }
 
   function disconnectProvider(message: string): void {
+    approvals.invalidate();
     failActiveTurns(message);
     runtime.adapter?.close();
     runtime.adapter = undefined;
@@ -546,6 +567,7 @@ async function startRuntime(
 
   async function restartProvider(): Promise<void> {
     const adapter = requireAdapter();
+    approvals.invalidate();
     runtime.providerStatus = "connecting";
     connectionStatus = "connecting";
     failActiveTurns("The Provider is restarting. This Turn failed.");
@@ -726,10 +748,10 @@ async function startRuntime(
     if (!source.threadId || !source.workspace) throw new Error("Only a started Chat can be branched.");
     if (!source.model) throw new Error("Choose a Provider-verified model before branching this Chat.");
     const adapter = requireAdapter();
+    if (!adapter.capabilities.branch) throw new Error("This Provider does not support Chat branching.");
     let threadId: string;
     let turns: Turn[] = [];
     if (message.turnId) {
-      if (!adapter.capabilities.branch) throw new Error("This Provider does not support Chat branching.");
       const forked = await adapter.forkThread(source.threadId, message.turnId);
       threadId = forked.thread.id;
       turns = forked.thread.turns;
@@ -796,7 +818,15 @@ async function startRuntime(
     }
     startingTurns += 1;
     try {
-      chat.turnId = await adapter.startTurn(chat.threadId, text, chat.model);
+      try {
+        chat.turnId = await adapter.startTurn(chat.threadId, text, chat.model);
+      } catch (error) {
+        if (catalog.unverifiedModels.includes(chat.model) && error instanceof ProviderBoundaryError)
+          throw new Error(
+            "The Provider rejected this unverified custom model. Choose a Provider-verified model and retry.",
+          );
+        throw error;
+      }
       broadcast({ type: "turn/accepted", chatId: chat.id, requestId });
       broadcast({
         type: "turn/started",
@@ -820,7 +850,7 @@ async function startRuntime(
   }
 
   function respondApproval(requestId: number | string, approved: boolean): void {
-    approvals.respond(requestId, approved, requireAdapter());
+    approvals.respond(requestId, approved);
   }
 
   function attachAdapter(adapter?: ProviderAdapter): void {
@@ -828,6 +858,7 @@ async function startRuntime(
     adapter.on("request", handleProviderRequest);
     adapter.on("notification", translateNotification);
     adapter.on("processExit", () => {
+      approvals.invalidate();
       runtime.providerStatus = "connecting";
       connectionStatus = "connecting";
       failActiveTurns("The Provider process stopped. This Turn failed; Norvyn is restarting the Provider.");
@@ -974,7 +1005,13 @@ async function startRuntime(
 
   function diagnostics(): DiagnosticsReport {
     const localSession =
-      runtime.preflight.kind === "signed-out" ? "missing" : runtime.preflight.ok ? "available" : "unknown";
+      runtime.preflight.kind === "expired"
+        ? "expired"
+        : runtime.preflight.kind === "signed-out"
+          ? "missing"
+          : runtime.preflight.ok
+            ? "available"
+            : "unknown";
     return createDiagnostics({
       norvynVersion: NORVYN_VERSION,
       codexPath: runtime.preflight.codexPath,
@@ -1100,7 +1137,7 @@ function isToolItem(item: ThreadItem): boolean {
 
 function explainError(error: TurnError): string {
   if (error.codexErrorInfo === "usageLimitExceeded")
-    return `You've reached your ChatGPT plan usage limit.${error.additionalDetails ? ` ${error.additionalDetails}` : ""}`;
+    return `You've reached your ChatGPT plan usage limit.${safeResetDetail(error.additionalDetails)}`;
   const providerMessage = readableProviderMessage(error.message);
   if (
     error.codexErrorInfo === "badRequest" &&
@@ -1108,11 +1145,19 @@ function explainError(error: TurnError): string {
   ) {
     return "This model isn't available with your ChatGPT account. Choose another available model and retry.";
   }
-  return providerMessage;
+  return "The Provider reported an unexpected Turn failure. Retry the Turn or reconnect the Provider.";
 }
 
 function browserErrorMessage(error: unknown): string {
+  if (error instanceof ProviderBoundaryError)
+    return "The Provider rejected this request. Check your setup and retry.";
   return readableProviderMessage(error instanceof Error ? error.message : String(error));
+}
+
+function safeResetDetail(detail: string | null): string {
+  if (!detail) return "";
+  const match = detail.match(/(?:resets?|try again)\s+(?:at|in)\s+[0-9:]+(?:\s+[A-Z]{2,5})?/i);
+  return match ? ` ${match[0]}.` : "";
 }
 
 function readableProviderMessage(message: string): string {
@@ -1166,6 +1211,11 @@ function sanitizeProgress(line: string): string {
 
 function send(connection: WebSocket, event: ServerEvent): void {
   if (connection.readyState === WebSocket.OPEN) connection.send(JSON.stringify(event));
+}
+
+function loopbackOrigin(server: Server): string | undefined {
+  const address = server.address();
+  return address && typeof address !== "string" ? `http://127.0.0.1:${address.port}` : undefined;
 }
 
 function findStaticDirectory(): string {

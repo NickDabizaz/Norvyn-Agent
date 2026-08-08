@@ -10,13 +10,32 @@ if (args[0] === "--version") {
 }
 
 if (args[0] === "login" && args[1] === "status") {
-  if (mode === "signed-out" && (!loginMarker || !existsSync(loginMarker))) process.exit(1);
+  if (mode === "expired" && (!loginMarker || !existsSync(loginMarker))) {
+    process.stderr.write("Codex Local Session expired\n");
+    process.exit(1);
+  }
+  if (
+    ["signed-out", "login-fails", "login-cancelled", "login-timeout"].includes(mode) &&
+    (!loginMarker || !existsSync(loginMarker))
+  )
+    process.exit(1);
   process.stdout.write("Logged in using ChatGPT\n");
   process.exit(0);
 }
 
 if (args[0] === "login") {
-  if (mode === "login-fails") process.exit(1);
+  if (mode === "login-fails") {
+    process.stderr.write("Provider sign-in failed\n");
+    process.exit(1);
+  }
+  if (mode === "login-cancelled") {
+    process.stderr.write("Provider sign-in cancelled\n");
+    process.exit(1);
+  }
+  if (mode === "login-timeout") {
+    await new Promise((resolve) => setTimeout(resolve, 10_000));
+    process.exit(0);
+  }
   if (loginMarker) writeFileSync(loginMarker, "connected");
   process.exit(0);
 }

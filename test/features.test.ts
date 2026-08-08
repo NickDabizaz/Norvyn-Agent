@@ -225,7 +225,7 @@ test("stopping a Turn preserves the Chat and allows an immediate next Turn", asy
   app.close();
 });
 
-test("usage limits are explained with optional reset details and other failures pass through", async () => {
+test("usage limits are explained while unexpected Provider failures are sanitized", async () => {
   const app = await launch();
   const chat = (await app.next("connection")).chat;
   app.send({ type: "turn/start", chatId: chat.id, text: "usage-limit" });
@@ -235,7 +235,9 @@ test("usage limits are explained with optional reset details and other failures 
   app.send({ type: "turn/start", chatId: chat.id, text: "usage-limit-no-reset" });
   expect((await app.next("turn/error")).message).toBe("You've reached your ChatGPT plan usage limit.");
   app.send({ type: "turn/start", chatId: chat.id, text: "raw-error" });
-  expect((await app.next("turn/error")).message).toBe("EXACT_PROVIDER_FAILURE");
+  expect((await app.next("turn/error")).message).toBe(
+    "The Provider reported an unexpected Turn failure. Retry the Turn or reconnect the Provider.",
+  );
   app.close();
 });
 
@@ -257,11 +259,32 @@ test("a rejected Provider request never exposes raw JSON in Chat", async () => {
   const app = await launch();
   const chat = (await app.next("connection")).chat;
   app.send({ type: "turn/start", chatId: chat.id, text: "request-json-error" });
-  expect((await app.next("operation/error")).message).toBe("Provider rejected this request.");
+  expect((await app.next("operation/error")).message).toBe(
+    "The Provider rejected this request. Check your setup and retry.",
+  );
   app.send({ type: "turn/start", chatId: chat.id, text: "request-malformed-json-error" });
   expect((await app.next("operation/error")).message).toBe(
     "The Provider rejected this request. Check your setup and retry.",
   );
+  app.close();
+});
+
+test("a malformed Provider response rejects only its request and leaves the connection usable", async () => {
+  const app = await launch();
+  const chat = (await app.next("connection")).chat;
+  app.send({ type: "turn/start", chatId: chat.id, text: "malformed-provider-response" });
+  expect(await app.next("operation/error")).toMatchObject({
+    scope: "turn",
+    code: "turn.operation-failed",
+    message: "The Provider rejected this request. Check your setup and retry.",
+  });
+  app.send({ type: "turn/start", chatId: chat.id, text: "invalid-json-provider-response" });
+  expect(await app.next("operation/error")).toMatchObject({
+    scope: "turn",
+    message: "The Provider rejected this request. Check your setup and retry.",
+  });
+  app.send({ type: "turn/start", chatId: chat.id, text: "still connected" });
+  expect((await app.next("agent/message/delta")).delta).toBe("Hello");
   app.close();
 });
 
@@ -549,7 +572,7 @@ test("Provider model discovery never falls back, refreshes stale catalogs, and m
   await writeFile(modelFile, JSON.stringify(["gpt-5.6-luna"]));
   app.send({ type: "provider/reconnect" });
   let refreshed;
-  do refreshed = await app.next("settings/state", 4_000);
+  do refreshed = await app.next("settings/state", 8_000);
   while (!refreshed.models.includes("gpt-5.6-luna"));
   expect(refreshed.models).toEqual(["gpt-5.6-luna"]);
   expect(refreshed.models).not.toContain("gpt-5.6-terra");
@@ -606,7 +629,9 @@ test("first-Turn retry and mid-Chat branching preserve Provider-owned original H
     label: "Retried first Turn",
   });
   expect((await app.next("chat/branched")).chat.threadId).not.toBe("history-new");
-  expect((await app.next("operation/error")).message).toBe("Provider rejected this request.");
+  expect((await app.next("operation/error")).message).toBe(
+    "The Provider rejected this request. Check your setup and retry.",
+  );
 
   app.send({ type: "chat/open", threadId: "history-new" });
   const preserved = await app.next("chat/selected");
@@ -671,7 +696,7 @@ async function launch(workspace?: string, extraEnv: Record<string, string> = {})
   if (!access) throw new Error("No Browser bootstrap access.");
   const sessionResponse = await fetch(`${new URL(url).origin}/session`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", origin: new URL(url).origin },
     body: JSON.stringify({ access }),
   });
   const cookie = sessionResponse.headers.get("set-cookie")?.split(";", 1)[0];

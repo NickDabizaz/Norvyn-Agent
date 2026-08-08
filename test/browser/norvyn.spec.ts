@@ -73,6 +73,35 @@ test("long Chat stays bounded, scrolls end to end, and keeps the composer visibl
   await content.evaluate((element) => (element.scrollTop = element.scrollHeight));
   expect(await content.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
 
+  const composerInput = page.getByRole("textbox", { name: "Start a Turn" });
+  await composerInput.fill("Follow streamed output at the bottom");
+  await page.keyboard.press("Enter");
+  await expect(page.getByText(/stream-11/).last()).toBeVisible();
+  expect(
+    await content.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight),
+  ).toBeLessThanOrEqual(24);
+
+  await content.evaluate((element) => {
+    element.scrollTop = element.scrollHeight * 0.45;
+    element.dispatchEvent(new Event("scroll"));
+  });
+  const anchoredEntry = await content.evaluate((element) => {
+    const bounds = element.getBoundingClientRect();
+    return [...element.querySelectorAll<HTMLElement>("[data-transcript-entry]")].find(
+      (entry) => entry.getBoundingClientRect().bottom > bounds.top,
+    )?.dataset.transcriptEntry;
+  });
+  await composerInput.fill("Preserve my scroll anchor");
+  await page.keyboard.press("Enter");
+  await expect(page.getByText("Hello").last()).toBeVisible();
+  const restoredEntry = await content.evaluate((element) => {
+    const bounds = element.getBoundingClientRect();
+    return [...element.querySelectorAll<HTMLElement>("[data-transcript-entry]")].find(
+      (entry) => entry.getBoundingClientRect().bottom > bounds.top,
+    )?.dataset.transcriptEntry;
+  });
+  expect(restoredEntry).toBe(anchoredEntry);
+
   const composer = await page.locator(".composer").boundingBox();
   const viewport = page.viewportSize();
   expect(composer).not.toBeNull();
@@ -86,10 +115,30 @@ test("History, Workspace, menus, divider, confirmations, and composer remain key
   const search = page.getByRole("textbox", { name: "Search Chats" });
   await search.fill("no-such-chat-cardinality-zero");
   await expect(page.getByText("No Chats found.")).toBeVisible();
+  const emptyWorkspaceTrigger = page.getByRole("button", { name: "Connect Folder" });
+  await emptyWorkspaceTrigger.click();
+  const emptyWorkspaceDialog = page.getByRole("dialog", { name: "Workspace picker" });
+  await expect(emptyWorkspaceDialog.locator("[data-menu-option]")).toHaveCount(0);
+  expect(await emptyWorkspaceDialog.evaluate((dialog) => dialog.contains(document.activeElement))).toBe(true);
+  await page.keyboard.press("Escape");
   await search.fill("Only-one-cardinality-marker");
   await expect(page.locator(".thread-row")).toHaveCount(1);
+  await emptyWorkspaceTrigger.click();
+  await expect(page.locator("[data-menu-option]")).toHaveCount(1);
+  await page.keyboard.press("Escape");
+  await search.fill("Five-workspace-cardinality-marker");
+  await expect(page.locator(".workspace-group")).toHaveCount(5);
+  await emptyWorkspaceTrigger.click();
+  await expect(page.locator("[data-menu-option]")).toHaveCount(5);
+  await page.keyboard.press("Escape");
+  await search.fill("Six-workspace-cardinality-marker");
+  await expect(page.locator(".workspace-group")).toHaveCount(6);
+  await emptyWorkspaceTrigger.click();
+  await expect(page.locator("[data-menu-option]")).toHaveCount(5);
+  await page.keyboard.press("Escape");
   await search.fill("");
   await expect(page.locator(".workspace-group")).toHaveCount(8);
+  expect(await page.locator(".workspace-group").count()).toBeGreaterThanOrEqual(6);
 
   const workspaceTrigger = page.getByRole("button", { name: "Connect Folder" });
   await workspaceTrigger.click();
@@ -163,7 +212,9 @@ test("errors stay human, zoom stays usable, and reduced motion removes animation
   await expect(textarea).toBeEnabled();
   await textarea.fill("request-json-error");
   await page.keyboard.press("Enter");
-  await expect(page.getByText("Provider rejected this request.").first()).toBeVisible();
+  await expect(
+    page.getByText("The Provider rejected this request. Check your setup and retry.").first(),
+  ).toBeVisible();
   await expect(page.locator("body")).not.toContainText('{"status"');
   await expect(page.locator("body")).not.toContainText("browser-test-access");
 

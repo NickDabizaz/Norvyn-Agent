@@ -43,6 +43,7 @@ import {
   type DropdownOption,
 } from "./sidebar.js";
 import { visibleTranscript } from "./windowing.js";
+import { transcriptScrollRevision, useTranscriptScrollAnchor } from "./transcript-scroll.js";
 import "highlight.js/styles/github-dark.css";
 import "./styles.css";
 
@@ -123,8 +124,12 @@ export function App() {
   const deleteDialog = useRef<HTMLElement>(null);
   const deleteDialogCancel = useRef<HTMLButtonElement>(null);
 
-  useModalFocus(showWorkspacePicker, workspacePicker, workspacePickerInitial, () =>
-    setShowWorkspacePicker(false),
+  useModalFocus(
+    showWorkspacePicker,
+    workspacePicker,
+    workspacePickerInitial,
+    () => setShowWorkspacePicker(false),
+    visibleWorkspaces(workspaces).length,
   );
   useModalFocus(Boolean(pendingWorkspaceDelete), deleteDialog, deleteDialogCancel, () =>
     setPendingWorkspaceDelete(undefined),
@@ -173,6 +178,10 @@ export function App() {
   const visibleThreads = useMemo(() => filterThreads(threads, search), [threads, search]);
   const groupedThreads = useMemo(() => groupThreadsByWorkspace(visibleThreads), [visibleThreads]);
   const renderedTranscript = visibleTranscript(transcript);
+  const transcriptScroller = useTranscriptScrollAnchor(
+    chat?.id,
+    transcriptScrollRevision(renderedTranscript),
+  );
   const modelOptions = [
     ...models.map((model) => modelOption(model)),
     ...unverifiedModels.map((model) => modelOption(model, false)),
@@ -870,7 +879,7 @@ export function App() {
               </button>
             </aside>
           )}
-          <div className="transcript" aria-live="polite">
+          <div ref={transcriptScroller} className="transcript" aria-live="polite">
             {preflightError ? (
               <aside className="preflight-alert" aria-live="assertive">
                 <p className="eyebrow">SETUP REQUIRED</p>
@@ -898,15 +907,16 @@ export function App() {
               </p>
             )}
             {renderedTranscript.map((entry) => (
-              <TranscriptEntryView
-                key={entry.id}
-                entry={entry}
-                busy={Boolean(chat?.turnId)}
-                canBranch={capabilities.branch}
-                onRetry={() => entry.kind === "user" && branchFrom(entry, true)}
-                onRevise={() => entry.kind === "user" && startRevision(entry)}
-                onBranch={() => (entry.kind === "user" || entry.kind === "assistant") && branchFrom(entry)}
-              />
+              <div key={entry.id} data-transcript-entry={entry.id}>
+                <TranscriptEntryView
+                  entry={entry}
+                  busy={Boolean(chat?.turnId)}
+                  canBranch={capabilities.branch}
+                  onRetry={() => entry.kind === "user" && branchFrom(entry, true)}
+                  onRevise={() => entry.kind === "user" && startRevision(entry)}
+                  onBranch={() => (entry.kind === "user" || entry.kind === "assistant") && branchFrom(entry)}
+                />
+              </div>
             ))}
           </div>
 
@@ -1280,10 +1290,20 @@ function TranscriptEntryView({
         <div className="message-actions">
           {entry.kind === "user" && (
             <>
-              <button type="button" disabled={busy} onClick={onRetry}>
+              <button
+                type="button"
+                disabled={busy || !canBranch}
+                title={!canBranch ? "This Provider does not support retry branching" : undefined}
+                onClick={onRetry}
+              >
                 Retry
               </button>
-              <button type="button" disabled={busy} onClick={onRevise}>
+              <button
+                type="button"
+                disabled={busy || !canBranch}
+                title={!canBranch ? "This Provider does not support revision branching" : undefined}
+                onClick={onRevise}
+              >
                 Revise
               </button>
             </>

@@ -2,20 +2,29 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { createInterface } from "node:readline";
 import type { InitializeParams } from "../schemas/InitializeParams.js";
-import type { ModelListResponse } from "../schemas/v2/ModelListResponse.js";
 import type { ServerNotificationEnvelope } from "../schemas/ServerNotificationEnvelope.js";
 import type { ServerRequest } from "../schemas/ServerRequest.js";
 import type { Thread } from "../schemas/v2/Thread.js";
 import type { ThreadForkResponse } from "../schemas/v2/ThreadForkResponse.js";
 import type { ThreadListParams } from "../schemas/v2/ThreadListParams.js";
-import type { ThreadListResponse } from "../schemas/v2/ThreadListResponse.js";
 import type { ThreadResumeResponse } from "../schemas/v2/ThreadResumeResponse.js";
 import type { ThreadStartParams } from "../schemas/v2/ThreadStartParams.js";
 import type { TurnStartParams } from "../schemas/v2/TurnStartParams.js";
 import type { ThreadCapabilities } from "./protocol.js";
+import { safeExecutablePath } from "./preflight.js";
+import {
+  decodeModelListResult,
+  decodeProviderMessage,
+  decodeThreadForkResult,
+  decodeThreadListResult,
+  decodeThreadResumeResult,
+  decodeThreadStartResult,
+  decodeTurnStartResult,
+  type ProviderId,
+} from "./provider-codec.js";
 
-type RpcId = number | string;
-type RpcMessage = {
+type RpcId = ProviderId;
+type OutgoingRpcMessage = {
   id?: RpcId;
   method?: string;
   params?: unknown;
@@ -115,7 +124,7 @@ export class CodexAdapter extends EventEmitter implements Transport, ThreadStore
       sandbox: "workspace-write",
       config: { sandbox_workspace_write: { writable_roots: [workspace], network_access: false } },
     };
-    const result = (await this.request("thread/start", params)) as { thread: { id: string } };
+    const result = decodeThreadStartResult(await this.request("thread/start", params));
     this.knownThreads.add(result.thread.id);
     return result.thread.id;
   }
@@ -129,7 +138,7 @@ export class CodexAdapter extends EventEmitter implements Transport, ThreadStore
       approvalPolicy: "on-request",
       approvalsReviewer: "user",
     };
-    const result = (await this.request("turn/start", params)) as { turn: { id: string } };
+    const result = decodeTurnStartResult(await this.request("turn/start", params));
     return result.turn.id;
   }
 
@@ -154,7 +163,7 @@ export class CodexAdapter extends EventEmitter implements Transport, ThreadStore
         archived: options.archived ?? false,
         isPinned: phase === "pinned",
       };
-      const response = (await this.request("thread/list", params)) as ThreadListResponse;
+      const response = decodeThreadListResult(await this.request("thread/list", params));
       collected.push(...response.data);
       if (response.nextCursor)
         return {
@@ -172,7 +181,7 @@ export class CodexAdapter extends EventEmitter implements Transport, ThreadStore
   }
 
   async resumeThread(threadId: string): Promise<ThreadResumeResponse> {
-    const result = (await this.request("thread/resume", resumeParams(threadId))) as ThreadResumeResponse;
+    const result = decodeThreadResumeResult(await this.request("thread/resume", resumeParams(threadId)));
     this.knownThreads.add(threadId);
     return result;
   }
@@ -181,11 +190,13 @@ export class CodexAdapter extends EventEmitter implements Transport, ThreadStore
     const models: string[] = [];
     let cursor: string | null = null;
     do {
-      const response = (await this.request("model/list", {
-        cursor,
-        limit: 100,
-        includeHidden: false,
-      })) as ModelListResponse;
+      const response = decodeModelListResult(
+        await this.request("model/list", {
+          cursor,
+          limit: 100,
+          includeHidden: false,
+        }),
+      );
       models.push(...response.data.filter((model) => !model.hidden).map((model) => model.model));
       cursor = response.nextCursor;
     } while (cursor);
@@ -214,10 +225,12 @@ export class CodexAdapter extends EventEmitter implements Transport, ThreadStore
   }
 
   async forkThread(threadId: string, lastTurnId?: string): Promise<ThreadForkResponse> {
-    const result = (await this.request("thread/fork", {
-      ...resumeParams(threadId),
-      lastTurnId,
-    })) as ThreadForkResponse;
+    const result = decodeThreadForkResult(
+      await this.request("thread/fork", {
+        ...resumeParams(threadId),
+        lastTurnId,
+      }),
+    );
     this.knownThreads.add(result.thread.id);
     return result;
   }
@@ -257,10 +270,13 @@ export class CodexAdapter extends EventEmitter implements Transport, ThreadStore
     this.process = child;
     child.stderr.on("data", (chunk) => this.emit("diagnostic", chunk.toString()));
     createInterface({ input: child.stdout }).on("line", (line) => {
+      let parsed: unknown;
       try {
-        this.receive(JSON.parse(line) as RpcMessage);
-      } catch (error) {
-        this.emit("diagnostic", `Invalid Provider message: ${String(error)}`);
+        parsed = JSON.parse(line) as unknown;
+        this.receive(decodeProviderMessage(parsed));
+      } catch {
+        if (!this.rejectMalformedResponse(parsed)) this.failPending(new ProviderBoundaryError());
+        this.emit("diagnostic", "The Provider sent a malformed protocol message.");
       }
     });
     child.once("error", (error) => this.handleExit(error));
@@ -315,21 +331,29 @@ export class CodexAdapter extends EventEmitter implements Transport, ThreadStore
 
   private requestNow(method: string, params: unknown): Promise<unknown> {
     const id = this.nextId++;
-    this.send({ id, method, params });
-    return new Promise((resolve, reject) => this.responses.set(id, { resolve, reject }));
+    return new Promise((resolve, reject) => {
+      this.responses.set(id, { resolve, reject });
+      try {
+        this.send({ id, method, params });
+      } catch (error) {
+        this.responses.delete(id);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
   }
 
-  private send(message: RpcMessage): void {
+  private send(message: OutgoingRpcMessage): void {
     if (!this.process?.stdin.writable) throw new Error("Provider process is unavailable.");
     this.process.stdin.write(`${JSON.stringify(message)}\n`);
   }
 
-  private receive(message: RpcMessage): void {
-    if (message.id !== undefined && message.method) {
-      this.emit("request", message as ServerRequest);
+  private receive(message: ReturnType<typeof decodeProviderMessage>): void {
+    if (message.kind === "request") {
+      if (message.request) this.emit("request", message.request);
+      else this.answerRequest(message.id, { decision: "decline" });
       return;
     }
-    if (message.id !== undefined) {
+    if (message.kind === "response") {
       const pending = this.responses.get(message.id);
       if (pending) {
         this.responses.delete(message.id);
@@ -338,12 +362,24 @@ export class CodexAdapter extends EventEmitter implements Transport, ThreadStore
       }
       return;
     }
-    if (message.method) this.emit("notification", message as ServerNotificationEnvelope);
+    if (message.notification) this.emit("notification", message.notification);
   }
 
   private failPending(error: Error): void {
     for (const pending of this.responses.values()) pending.reject(error);
     this.responses.clear();
+  }
+
+  private rejectMalformedResponse(input: unknown): boolean {
+    if (!input || typeof input !== "object" || Array.isArray(input)) return false;
+    const value = input as Record<string, unknown>;
+    if (value.method !== undefined) return false;
+    if (typeof value.id !== "number" && typeof value.id !== "string") return false;
+    const pending = this.responses.get(value.id);
+    if (!pending) return false;
+    this.responses.delete(value.id);
+    pending.reject(new ProviderBoundaryError());
+    return true;
   }
 }
 
@@ -371,10 +407,15 @@ function resumeParams(threadId: string) {
   return { threadId, approvalPolicy: "on-request" as const, approvalsReviewer: "user" as const };
 }
 
-function providerError(error: { message: string; data?: unknown }): Error {
-  const result = new Error(error.message);
-  Object.assign(result, { data: error.data });
-  return result;
+export class ProviderBoundaryError extends Error {
+  constructor() {
+    super("The Provider rejected this request. Check your setup and retry.");
+    this.name = "ProviderBoundaryError";
+  }
+}
+
+function providerError(_error: { message: string; data?: unknown }): Error {
+  return new ProviderBoundaryError();
 }
 
 export function providerLaunch(
@@ -392,7 +433,7 @@ export function providerLaunch(
   }
   const executable = codexPath?.trim() || "codex";
   if (platform === "win32") {
-    const quoted = executable.includes(" ") ? `"${executable.replaceAll('"', "")}"` : executable;
+    const quoted = safeExecutablePath(executable);
     return { command: environment.ComSpec ?? "cmd.exe", args: ["/d", "/s", "/c", `${quoted} app-server`] };
   }
   return { command: executable, args: ["app-server"] };

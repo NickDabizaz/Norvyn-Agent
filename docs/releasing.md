@@ -19,11 +19,14 @@ OpenID Connect identity.
 
 1. Run the full local verification with `npm run verify`.
 2. Push the reviewed commit to `master`.
-3. Open **Actions → Release → Run workflow** and enter the exact semantic version to publish, such as `0.2.0`.
+3. Open **Actions → Publish npm package → Run workflow** and enter the exact semantic version to publish, such
+   as `0.2.0`.
 4. Approve the `npm` environment deployment when prompted.
 
 The workflow verifies that the requested version matches `package.json`, runs the complete test suite, packs
 and smoke-tests the package, publishes it with provenance, creates the matching Git tag, and creates a GitHub
 release.
 
-If any verification step fails, the workflow stops before publishing.
+If any verification step fails, the workflow stops before publishing. If npm publishing succeeds but GitHub
+Release creation is interrupted, rerun the same workflow and version; the publish and release steps are
+idempotent and resume from the missing artifact.

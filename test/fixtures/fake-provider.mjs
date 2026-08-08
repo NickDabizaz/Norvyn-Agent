@@ -45,7 +45,11 @@ if (requestedHistoryCount > seededThreads.length) {
         ? "A very long architecture discussion title that must remain operable without clipping actions"
         : index === 1
           ? "Only-one-cardinality-marker"
-          : `Synthetic Chat ${index}`,
+          : index >= 40 && index < 45
+            ? `Five-workspace-cardinality-marker ${index}`
+            : index >= 50 && index < 56
+              ? `Six-workspace-cardinality-marker ${index}`
+              : `Synthetic Chat ${index}`,
       index === 0
         ? "C:\\workspaces\\a-very-long-workspace-name\\nested\\deeper\\norvyn-agent"
         : `C:\\workspaces\\${index % 7}`,
@@ -152,7 +156,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     if (process.env.NORVYN_FAKE_LONG_CHAT === "1")
       found.turns = Array.from({ length: 260 }, (_, index) => ({
         id: `long-turn-${index}`,
-        itemsView: { type: "full" },
+        itemsView: "full",
         status: "completed",
         error: null,
         startedAt: index * 2 + 1,
@@ -184,7 +188,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       found.turns = [
         {
           id: "past-turn",
-          itemsView: { type: "full" },
+          itemsView: "full",
           status: "completed",
           error: null,
           startedAt: 1,
@@ -267,6 +271,14 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   }
   if (message.method === "turn/start") {
     const text = message.params.input[0].text;
+    if (text === "malformed-provider-response") {
+      process.stdout.write(`${JSON.stringify({ id: message.id, error: { message: 42 } })}\n`);
+      return;
+    }
+    if (text === "invalid-json-provider-response") {
+      process.stdout.write("{invalid-provider-json\n");
+      return;
+    }
     if (String(message.params.model).startsWith("custom-")) {
       reject(message.id, { message: "The custom model is not available. Choose a Provider-verified model." });
       return;
@@ -295,6 +307,28 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       if (found) found.name = "Provider renamed Chat";
       notify("thread/name/updated", { threadId: message.params.threadId, name: "Provider renamed Chat" });
       complete(turnId, message.params.threadId, "Renamed", text);
+      return;
+    }
+    if (text === "Follow streamed output at the bottom") {
+      const chunks = Array.from({ length: 12 }, (_, index) => `stream-${index} ${"x".repeat(160)} `);
+      chunks.forEach((chunk, index) =>
+        setTimeout(
+          () => {
+            notify("item/agentMessage/delta", {
+              threadId: message.params.threadId,
+              turnId,
+              itemId: `agent-${turnId}`,
+              delta: chunk,
+            });
+            if (index === chunks.length - 1)
+              notify("turn/completed", {
+                threadId: message.params.threadId,
+                turn: completedTurn(turnId),
+              });
+          },
+          10 * (index + 1),
+        ),
+      );
       return;
     }
     if (text === "unsupported-model") {
@@ -429,7 +463,7 @@ function complete(turnId, threadId, text, userText) {
   if (found && userText)
     found.turns.push({
       id: turnId,
-      itemsView: { type: "full" },
+      itemsView: "full",
       status: "completed",
       error: null,
       startedAt: 1,
@@ -452,7 +486,7 @@ function completedTurn(id) {
   return {
     id,
     items: [],
-    itemsView: { type: "full" },
+    itemsView: "full",
     status: "completed",
     error: null,
     startedAt: 1,

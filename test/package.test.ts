@@ -106,7 +106,7 @@ async function connect(httpUrl: string): Promise<unknown> {
   const accessToken = new URLSearchParams(new URL(httpUrl).hash.slice(1)).get("access");
   const response = await fetch(`${new URL(httpUrl).origin}/session`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", origin: new URL(httpUrl).origin },
     body: JSON.stringify({ access: accessToken }),
   });
   const cookie = response.headers.get("set-cookie")?.split(";", 1)[0];

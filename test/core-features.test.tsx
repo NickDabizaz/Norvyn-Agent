@@ -14,7 +14,8 @@ import { ChatRegistry } from "../src/features/chats.js";
 import { mergeHistoryPages } from "../src/features/history.js";
 import { checkForUpdate, isNewer, performConfirmedUpdate, updateCommand } from "../src/features/update.js";
 import { PlatformWorkspacePicker } from "../src/features/workspace-picker.js";
-import { parseBrowserCommand } from "../src/protocol.js";
+import { parseBrowserCommand, parseServerEvent } from "../src/protocol.js";
+import { decodeProviderMessage } from "../src/provider-codec.js";
 import { DEFAULT_SETTINGS, loadUserSettings, saveUserSettings } from "../src/settings.js";
 import { NORVYN_VERSION } from "../src/version.js";
 
@@ -128,6 +129,55 @@ test("unsupported browser protocol variants fail explicitly", () => {
   ).toThrow("Invalid accessMode");
 });
 
+test("nested Browser and Provider boundary payloads are decoded before feature logic", () => {
+  expect(() =>
+    parseServerEvent({
+      type: "connection",
+      status: "connected",
+      workspace: "C:\\work",
+      providerStatus: "connected",
+      workspaceBrowseAvailable: true,
+      capabilities: {
+        rename: true,
+        pin: true,
+        archive: true,
+        restore: true,
+        delete: true,
+        branch: "yes",
+      },
+    }),
+  ).toThrow("capabilities.branch");
+  expect(() =>
+    parseServerEvent({
+      type: "history/page",
+      threads: [
+        {
+          id: "one",
+          title: "One",
+          preview: "",
+          workspace: "C:\\work",
+          updatedAt: 2,
+          createdAt: 1,
+          pinned: false,
+        },
+      ],
+      workspaces: ["C:\\work"],
+      archived: false,
+      reset: true,
+    }),
+  ).toThrow("threads[0].archived");
+  expect(() =>
+    decodeProviderMessage({
+      method: "item/agentMessage/delta",
+      params: { threadId: "thread", turnId: "turn", itemId: "item", delta: 42 },
+    }),
+  ).toThrow("params.delta");
+  expect(() => decodeProviderMessage({ id: 1, error: { message: { secret: true } } })).toThrow(
+    "error.message",
+  );
+  expect(decodeProviderMessage({ id: 1, result: {} })).toEqual({ kind: "response", id: 1, result: {} });
+});
+
 test("diagnostic export removes credentials recursively and gives unhealthy states a next action", () => {
   const report = createDiagnostics({
     norvynVersion: "1.0.0",
@@ -231,8 +281,15 @@ test("Chat and approval feature seams are independently testable", () => {
   expect(emit).toHaveBeenCalledWith(
     expect.objectContaining({ type: "approval/request", requestId: 7, kind: "file-change" }),
   );
-  approvals.respond(7, false, { answerRequest });
+  approvals.respond(7, false);
   expect(answerRequest).toHaveBeenCalledWith(7, { decision: "decline" });
+
+  const replacementAnswer = vi.fn();
+  approvals.handle({ ...request, id: 9 } as ServerRequest, { answerRequest }, chat);
+  approvals.invalidate();
+  expect(answerRequest).toHaveBeenCalledWith(9, { decision: "decline" });
+  expect(() => approvals.respond(9, true)).toThrow("no longer pending");
+  expect(replacementAnswer).not.toHaveBeenCalled();
 
   chat.accessMode = "auto-edit";
   approvals.handle({ ...request, id: 8 } as ServerRequest, { answerRequest }, chat);

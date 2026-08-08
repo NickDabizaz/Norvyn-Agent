@@ -6,7 +6,10 @@ export interface ApprovalResponder {
 }
 
 export class ApprovalFeature {
-  private readonly pending = new Map<number | string, NodeJS.Timeout>();
+  private readonly pending = new Map<
+    number | string,
+    { timeout: NodeJS.Timeout; adapter: ApprovalResponder }
+  >();
 
   constructor(
     private readonly timeoutMs: number,
@@ -36,25 +39,45 @@ export class ApprovalFeature {
     const target = isFileChange
       ? (request.params.grantRoot ?? request.params.reason ?? request.params.itemId)
       : (request.params.command ?? request.params.reason ?? request.params.itemId);
+    this.invalidate(request.id);
     const timeout = setTimeout(() => {
       this.pending.delete(request.id);
       adapter.answerRequest(request.id, { decision: "decline" });
       this.emit({ type: "approval/expired", requestId: request.id });
     }, this.timeoutMs);
-    this.pending.set(request.id, timeout);
+    this.pending.set(request.id, { timeout, adapter });
     this.emit({ type: "approval/request", requestId: request.id, chatId: chat?.id, kind, target });
   }
 
-  respond(requestId: number | string, approved: boolean, adapter: ApprovalResponder): void {
-    const timeout = this.pending.get(requestId);
-    if (!timeout) throw new Error("That approval request is no longer pending.");
-    clearTimeout(timeout);
+  respond(requestId: number | string, approved: boolean): void {
+    const pending = this.pending.get(requestId);
+    if (!pending) throw new Error("That approval request is no longer pending.");
+    clearTimeout(pending.timeout);
     this.pending.delete(requestId);
-    adapter.answerRequest(requestId, { decision: approved ? "accept" : "decline" });
+    pending.adapter.answerRequest(requestId, { decision: approved ? "accept" : "decline" });
+  }
+
+  invalidate(requestId?: number | string): void {
+    const entries =
+      requestId === undefined
+        ? [...this.pending.entries()]
+        : this.pending.has(requestId)
+          ? ([[requestId, this.pending.get(requestId)!]] as const)
+          : [];
+    for (const [id, pending] of entries) {
+      clearTimeout(pending.timeout);
+      this.pending.delete(id);
+      try {
+        pending.adapter.answerRequest(id, { decision: "decline" });
+      } catch {
+        // The originating Provider may already have exited. Never forward this decision to a replacement.
+      }
+      this.emit({ type: "approval/expired", requestId: id });
+    }
   }
 
   close(): void {
-    for (const timeout of this.pending.values()) clearTimeout(timeout);
+    for (const pending of this.pending.values()) clearTimeout(pending.timeout);
     this.pending.clear();
   }
 }

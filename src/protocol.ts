@@ -386,7 +386,8 @@ export function parseServerEvent(input: unknown): ServerEvent {
         "disconnected",
         "failed",
       ]);
-      objectValue(value.capabilities, "capabilities");
+      capabilitiesValue(value.capabilities);
+      if (value.chat !== undefined) chatValue(value.chat);
       booleanValue(value.workspaceBrowseAvailable, "workspaceBrowseAvailable");
       optionalStringArray(value.models, "models");
       optionalStringArray(value.unverifiedModels, "unverifiedModels");
@@ -431,7 +432,9 @@ export function parseServerEvent(input: unknown): ServerEvent {
       optionalString(value.message, "message");
       break;
     case "history/page":
-      arrayValue(value.threads, "threads");
+      arrayValue(value.threads, "threads").forEach((thread, index) =>
+        threadSummaryValue(thread, `threads[${index}]`),
+      );
       stringArray(value.workspaces, "workspaces");
       optionalString(value.nextCursor, "nextCursor");
       booleanValue(value.archived, "archived");
@@ -450,7 +453,9 @@ export function parseServerEvent(input: unknown): ServerEvent {
     case "chat/selected":
     case "chat/branched":
       chatValue(value.chat);
-      arrayValue(value.transcript, "transcript");
+      arrayValue(value.transcript, "transcript").forEach((turn, index) =>
+        turnValue(turn, `transcript[${index}]`),
+      );
       break;
     case "chat/updated":
       chatValue(value.chat);
@@ -477,7 +482,7 @@ export function parseServerEvent(input: unknown): ServerEvent {
     case "turn/completed":
       optionalString(value.chatId, "chatId");
       optionalString(value.threadId, "threadId");
-      if (value.turn !== undefined) objectValue(value.turn, "turn");
+      if (value.turn !== undefined) turnValue(value.turn, "turn");
       break;
     case "turn/error":
       stringValue(value.message, "message");
@@ -496,7 +501,7 @@ export function parseServerEvent(input: unknown): ServerEvent {
     case "tool/activity":
       stringValue(value.threadId, "threadId");
       stringValue(value.turnId, "turnId");
-      objectValue(value.item, "item");
+      threadItemValue(value.item, "item");
       enumValue(value.status, "status", ["in-progress", "completed"]);
       break;
     case "approval/request":
@@ -541,7 +546,7 @@ export function parseServerEvent(input: unknown): ServerEvent {
       stringValue(value.message, "message");
       break;
     case "diagnostics/state":
-      objectValue(value.report, "report");
+      diagnosticsValue(value.report);
       break;
     case "diagnostics/export":
       stringValue(value.filename, "filename");
@@ -599,6 +604,116 @@ function chatValue(input: unknown): void {
   optionalString(value.modelNotice, "chat.modelNotice");
   enumValue(value.accessMode, "chat.accessMode", ["manual", "auto-edit", "auto"]);
   optionalString(value.turnId, "chat.turnId");
+  if (value.origin !== undefined) {
+    const origin = objectValue(value.origin, "chat.origin");
+    stringValue(origin.threadId, "chat.origin.threadId");
+    optionalString(origin.turnId, "chat.origin.turnId");
+    stringValue(origin.label, "chat.origin.label");
+  }
+}
+
+function capabilitiesValue(input: unknown): void {
+  const value = objectValue(input, "capabilities");
+  for (const field of ["rename", "pin", "archive", "restore", "delete", "branch"])
+    booleanValue(value[field], `capabilities.${field}`);
+}
+
+function threadSummaryValue(input: unknown, field: string): void {
+  const value = objectValue(input, field);
+  stringValue(value.id, `${field}.id`);
+  stringValue(value.title, `${field}.title`);
+  textValue(value.preview, `${field}.preview`);
+  stringValue(value.workspace, `${field}.workspace`);
+  numberValue(value.updatedAt, `${field}.updatedAt`);
+  numberValue(value.createdAt, `${field}.createdAt`);
+  booleanValue(value.pinned, `${field}.pinned`);
+  booleanValue(value.archived, `${field}.archived`);
+}
+
+function turnValue(input: unknown, field: string): void {
+  const value = objectValue(input, field);
+  stringValue(value.id, `${field}.id`);
+  arrayValue(value.items, `${field}.items`).forEach((item, index) =>
+    threadItemValue(item, `${field}.items[${index}]`),
+  );
+  enumValue(value.itemsView, `${field}.itemsView`, ["notLoaded", "summary", "full"]);
+  enumValue(value.status, `${field}.status`, ["completed", "interrupted", "failed", "inProgress"]);
+  nullableObject(value.error, `${field}.error`);
+  nullableNumber(value.startedAt, `${field}.startedAt`);
+  nullableNumber(value.completedAt, `${field}.completedAt`);
+  nullableNumber(value.durationMs, `${field}.durationMs`);
+}
+
+function threadItemValue(input: unknown, field: string): void {
+  const value = objectValue(input, field);
+  const type = enumValue(value.type, `${field}.type`, [
+    "userMessage",
+    "hookPrompt",
+    "agentMessage",
+    "plan",
+    "reasoning",
+    "commandExecution",
+    "fileChange",
+    "mcpToolCall",
+    "dynamicToolCall",
+    "collabAgentToolCall",
+    "subAgentActivity",
+    "webSearch",
+    "imageView",
+    "sleep",
+    "imageGeneration",
+    "enteredReviewMode",
+    "exitedReviewMode",
+    "contextCompaction",
+  ]);
+  if (type !== "webSearch" && type !== "sleep" && type !== "imageGeneration")
+    stringValue(value.id, `${field}.id`);
+  if (type === "userMessage") {
+    arrayValue(value.content, `${field}.content`).forEach((part, index) => {
+      const content = objectValue(part, `${field}.content[${index}]`);
+      const contentType = stringValue(content.type, `${field}.content[${index}].type`);
+      if (contentType === "text") textValue(content.text, `${field}.content[${index}].text`);
+    });
+  } else if (type === "agentMessage" || type === "plan") {
+    textValue(value.text, `${field}.text`);
+  } else if (type === "reasoning") {
+    stringArray(value.summary, `${field}.summary`);
+    stringArray(value.content, `${field}.content`);
+  } else if (type === "commandExecution") {
+    stringValue(value.command, `${field}.command`);
+    optionalText(value.aggregatedOutput, `${field}.aggregatedOutput`);
+  } else if (type === "fileChange") {
+    arrayValue(value.changes, `${field}.changes`).forEach((change, index) =>
+      objectValue(change, `${field}.changes[${index}]`),
+    );
+  }
+}
+
+function diagnosticsValue(input: unknown): void {
+  const value = objectValue(input, "report");
+  stringValue(value.norvynVersion, "report.norvynVersion");
+  stringValue(value.codexPath, "report.codexPath");
+  optionalString(value.codexVersion, "report.codexVersion");
+  enumValue(value.localSession, "report.localSession", ["available", "missing", "expired", "unknown"]);
+  enumValue(value.providerProcess, "report.providerProcess", [
+    "missing",
+    "signed-out",
+    "connecting",
+    "connected",
+    "disconnected",
+    "failed",
+  ]);
+  enumValue(value.connection, "report.connection", ["connecting", "connected", "disconnected"]);
+  optionalString(value.nextAction, "report.nextAction");
+  stringValue(value.generatedAt, "report.generatedAt");
+}
+
+function nullableObject(value: unknown, field: string): void {
+  if (value !== null) objectValue(value, field);
+}
+
+function nullableNumber(value: unknown, field: string): void {
+  if (value !== null) numberValue(value, field);
 }
 
 function objectValue(value: unknown, field: string): Record<string, unknown> {
@@ -617,9 +732,19 @@ function stringValue(value: unknown, field: string): string {
   return value;
 }
 
+function textValue(value: unknown, field: string): string {
+  if (typeof value !== "string") invalidField(field, "must be a string");
+  return value;
+}
+
 function optionalString(value: unknown, field: string): string | undefined {
   if (value === undefined || value === null) return undefined;
   return stringValue(value, field);
+}
+
+function optionalText(value: unknown, field: string): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  return textValue(value, field);
 }
 
 function booleanValue(value: unknown, field: string): boolean {

@@ -1,4 +1,4 @@
-import { useEffect, useRef, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useRef, type RefObject } from "react";
 
 const focusableSelector = [
   "button:not([disabled])",
@@ -14,6 +14,7 @@ export function useModalFocus(
   container: RefObject<HTMLElement | null>,
   initial: RefObject<HTMLElement | null>,
   close: () => void,
+  focusRevision: string | number = 0,
 ): void {
   const previousFocus = useRef<HTMLElement | undefined>(undefined);
   const closeRef = useRef(close);
@@ -22,11 +23,15 @@ export function useModalFocus(
     closeRef.current = close;
   }, [close]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!open) return;
     previousFocus.current =
       document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
-    queueMicrotask(() => initial.current?.focus());
+    const target =
+      initial.current?.isConnected === true
+        ? initial.current
+        : container.current?.querySelector<HTMLElement>(focusableSelector);
+    target?.focus();
 
     function handleKey(event: KeyboardEvent) {
       if (event.key === "Escape") {
@@ -53,7 +58,7 @@ export function useModalFocus(
       document.removeEventListener("keydown", handleKey);
       previousFocus.current?.focus();
     };
-  }, [container, initial, open]);
+  }, [container, focusRevision, initial, open]);
 }
 
 export function moveMenuFocus(container: HTMLElement, current: HTMLElement, key: string): boolean {

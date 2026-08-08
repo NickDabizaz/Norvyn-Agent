@@ -6,7 +6,7 @@ export type Preflight =
   | { ok: true; kind: "ready"; codexPath: string; version: string }
   | {
       ok: false;
-      kind: "missing" | "outdated" | "signed-out";
+      kind: "missing" | "outdated" | "signed-out" | "expired";
       codexPath: string;
       version?: string;
       message: string;
@@ -49,13 +49,14 @@ export async function checkPreflight(codexPath?: string): Promise<Preflight> {
   try {
     const status = await runCodex(["login", "status"], resolvedPath);
     if (!/logged in/i.test(status)) throw new Error("not logged in");
-  } catch {
+  } catch (error) {
+    const expired = error instanceof Error && /expired/i.test(error.message);
     return {
       ok: false,
-      kind: "signed-out",
+      kind: expired ? "expired" : "signed-out",
       codexPath: resolvedPath,
       version,
-      message: "No Codex Local Session is available.",
+      message: expired ? "The Codex Local Session has expired." : "No Codex Local Session is available.",
     };
   }
   return { ok: true, kind: "ready", codexPath: resolvedPath, version };
@@ -91,7 +92,7 @@ function runCodex(args: string[], codexPath: string, timeoutMs = 30_000): Promis
     : [];
   const command =
     configuredCommand ?? (process.platform === "win32" ? (process.env.ComSpec ?? "cmd.exe") : codexPath);
-  const executable = codexPath.includes(" ") ? `"${codexPath.replaceAll('"', "")}"` : codexPath;
+  const executable = safeExecutablePath(codexPath);
   const commandArgs = configuredCommand
     ? [...configuredArguments, ...args]
     : process.platform === "win32"
@@ -121,7 +122,14 @@ function runCodex(args: string[], codexPath: string, timeoutMs = 30_000): Promis
       settled = true;
       clearTimeout(timer);
       if (code === 0) resolve(output);
-      else reject(new Error("Codex operation failed or was cancelled."));
+      else reject(new Error(output.trim() || "Codex operation failed or was cancelled."));
     });
   });
+}
+
+export function safeExecutablePath(codexPath: string): string {
+  const result = codexPath.trim();
+  if (!result || /[&|<>^"%!()\r\n]/.test(result))
+    throw new Error("The Codex executable path contains unsupported command characters.");
+  return result.includes(" ") ? `"${result}"` : result;
 }

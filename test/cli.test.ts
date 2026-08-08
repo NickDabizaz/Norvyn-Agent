@@ -60,6 +60,7 @@ test("Norvyn refuses WebSocket connections without POST-created browser authoriz
   await expect(connectSocket(url, cookie, "https://attacker.example")).rejects.toThrow(
     "Unexpected server response: 401",
   );
+  expect((await createBrowserSession(url, accessFrom(url), "https://attacker.example")).status).toBe(403);
   expect((await fetch(`${new URL(url).origin}/session`)).status).toBe(405);
   const queryResponse = await fetch(`${new URL(url).origin}/?access=${accessFrom(url)}`);
   expect(queryResponse.status).toBe(400);
@@ -144,6 +145,11 @@ test("Windows starts the Codex app-server through the command launcher", () => {
   });
 });
 
+test("Windows rejects shell metacharacters in a configured Codex path", () => {
+  expect(() => providerLaunch({}, "win32", "codex&whoami")).toThrow("unsupported command characters");
+  expect(() => providerLaunch({}, "win32", "C:\\Program Files\\Codex\\codex.exe")).not.toThrow();
+});
+
 test("Browser receives an install step when the Codex CLI is missing", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "norvyn-workspace-"));
   temporaryWorkspaces.push(workspace);
@@ -219,6 +225,25 @@ test("Browser offers Provider-owned sign-in when there is no Local Session", asy
   );
 });
 
+test("diagnostics distinguish an expired Provider-owned Local Session", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "norvyn-workspace-"));
+  temporaryWorkspaces.push(workspace);
+  const child = startCli(workspace, fakeCodex("expired"));
+  runningProcesses.push(child);
+
+  const events = await connectAll(await firstLine(child.stdout!));
+  expect(events).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ type: "connection", providerStatus: "signed-out" }),
+      expect.objectContaining({
+        type: "diagnostics/state",
+        report: expect.objectContaining({ localSession: "expired" }),
+      }),
+      { type: "auth/state", status: "required" },
+    ]),
+  );
+});
+
 test("Connect With Codex triggers Provider-owned authentication and enters Chat automatically", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "norvyn-workspace-"));
   const markerDirectory = await mkdtemp(join(tmpdir(), "norvyn-login-"));
@@ -239,6 +264,28 @@ test("Connect With Codex triggers Provider-owned authentication and enters Chat 
   );
   expect((await app.next("connection", (event) => event.status === "connected")).chat.accessMode).toBe(
     "manual",
+  );
+  app.close();
+});
+
+test.each([
+  ["login-fails", "failed"],
+  ["login-cancelled", "cancelled"],
+  ["login-timeout", "timed-out"],
+] as const)("Connect With Codex reports %s through the Provider seam", async (mode, expectedStatus) => {
+  const workspace = await mkdtemp(join(tmpdir(), "norvyn-workspace-"));
+  temporaryWorkspaces.push(workspace);
+  const child = startCli(workspace, {
+    ...fakeCodex(mode),
+    ...(mode === "login-timeout" ? { NORVYN_LOGIN_TIMEOUT_MS: "25" } : {}),
+  });
+  runningProcesses.push(child);
+  const app = await connectInteractive(await firstLine(child.stdout!));
+  await app.next("auth/state", (event) => event.status === "required");
+  app.send({ type: "auth/connect" });
+  await app.next("auth/state", (event) => event.status === "connecting");
+  expect((await app.next("auth/state", (event) => event.status === expectedStatus)).status).toBe(
+    expectedStatus,
   );
   app.close();
 });
@@ -320,7 +367,9 @@ async function connectAll(httpUrl: string): Promise<unknown[]> {
   });
 }
 
-function fakeCodex(mode: "old" | "signed-out"): NodeJS.ProcessEnv {
+function fakeCodex(
+  mode: "old" | "signed-out" | "expired" | "login-fails" | "login-cancelled" | "login-timeout",
+): NodeJS.ProcessEnv {
   const sourceRoot = process.cwd();
   return {
     NORVYN_SKIP_PREFLIGHT: undefined,
@@ -398,10 +447,14 @@ function accessFrom(httpUrl: string): string {
   return access;
 }
 
-function createBrowserSession(httpUrl: string, access = accessFrom(httpUrl)): Promise<Response> {
+function createBrowserSession(
+  httpUrl: string,
+  access = accessFrom(httpUrl),
+  origin = new URL(httpUrl).origin,
+): Promise<Response> {
   return fetch(`${new URL(httpUrl).origin}/session`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", origin },
     body: JSON.stringify({ access }),
   });
 }

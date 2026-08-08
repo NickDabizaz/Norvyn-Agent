@@ -9,7 +9,7 @@ on:
         type: string
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 jobs:
@@ -34,4 +34,27 @@ jobs:
           }
       - run: npm run verify
       - run: npm pack --dry-run
-      - run: npm publish
+      - name: Publish package if needed
+        shell: pwsh
+        run: |
+          $version = '${{ inputs.version }}'
+          $published = npm view "norvyn@$version" version 2>$null
+          if ($LASTEXITCODE -eq 0 -and $published.Trim() -eq $version) {
+            Write-Host "norvyn@$version is already published; continuing recovery."
+          } else {
+            npm publish
+            if ($LASTEXITCODE -ne 0) { throw "npm publish failed" }
+          }
+      - name: Create Git tag and GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "v${{ inputs.version }}"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "$tag already exists; release workflow is complete."
+          } else {
+            gh release create $tag --target "${{ github.sha }}" --generate-notes
+            if ($LASTEXITCODE -ne 0) { throw "GitHub Release creation failed" }
+          }
